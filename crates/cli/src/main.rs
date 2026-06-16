@@ -77,6 +77,7 @@ fn main() {
                 step_id,
                 suggestion,
                 expects_artifact,
+                ..
             } => {
                 println!("  ⏸ {step_id}: {suggestion}");
                 let cmd = prompt_gate(&step_id, expects_artifact);

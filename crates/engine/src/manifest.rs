@@ -1,8 +1,8 @@
 use crate::error::EngineError;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Manifest {
     pub version: u32,
     pub name: String,
@@ -12,7 +12,7 @@ pub struct Manifest {
     pub steps: Vec<Step>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RunMode {
     Step,
@@ -20,14 +20,14 @@ pub enum RunMode {
     Auto,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Step {
     pub id: String,
     #[serde(flatten)]
     pub kind: StepKind,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum StepKind {
     Claude {
@@ -60,7 +60,7 @@ pub enum StepKind {
     },
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodexAction {
     ReviewDoc,

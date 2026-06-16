@@ -1,6 +1,15 @@
 use crate::context::Verdict;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GateKind {
+    Step,
+    Human,
+    Decision,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum StepStatus {
     Pending,
     Running,
@@ -10,12 +19,18 @@ pub enum StepStatus {
     Skipped,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum Event {
     RunStarted { name: String },
     StepStarted { step_id: String, kind: String },
     StepProgress { step_id: String, line: String },
-    StepAwaitingGate { step_id: String, suggestion: String, expects_artifact: bool },
+    StepAwaitingGate {
+        step_id: String,
+        suggestion: String,
+        expects_artifact: bool,
+        gate_kind: GateKind,
+    },
     StepFinished { step_id: String, status: StepStatus, summary: String },
     StepFailed { step_id: String, error: String },
     LoopIteration { loop_id: String, iteration: u32 },
@@ -24,18 +39,20 @@ pub enum Event {
     RunFinished { status: RunStatus },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RunStatus {
     Success,
     Failed,
     Aborted,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
 pub enum Command {
     ApproveGate { step_id: String, artifact: Option<String> },
     SkipStep { step_id: String },
     Interrupt,
+    #[deprecated(note = "用决策 gate 的 ApproveGate 表达重试")]
     Resume,
     Abort,
 }

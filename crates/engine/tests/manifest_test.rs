@@ -68,6 +68,27 @@ steps:
 }
 
 #[test]
+fn validate_loop_codex_clean_requires_codex_step() {
+    let yaml = r#"
+version: 1
+name: bad
+target: /tmp
+steps:
+  - id: l
+    kind: loop
+    until: codex-clean
+    max: 2
+    body:
+      - id: only
+        kind: claude
+        prompt: x
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let err = m.validate().unwrap_err();
+    assert!(err.to_string().contains("codex step"));
+}
+
+#[test]
 fn validate_accepts_sample() {
     let yaml = include_str!("../../../tests/fixtures/sample-task.yaml");
     Manifest::parse(yaml)

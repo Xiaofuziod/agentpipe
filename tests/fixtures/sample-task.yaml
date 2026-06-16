@@ -1,0 +1,22 @@
+version: 1
+name: "demo"
+target: /tmp/demo-repo
+mode: auto
+steps:
+  - id: design-codex
+    kind: codex
+    action: review-doc
+    path: "docs/spec.md"
+  - id: fix-loop
+    kind: loop
+    until: codex-clean
+    max: 3
+    body:
+      - id: review-mr
+        kind: codex
+        action: review-mr
+        base: dev
+      - id: apply
+        kind: claude
+        prompt: "按反馈修改:{{review-mr.findings}}"
+        allow_writes: true

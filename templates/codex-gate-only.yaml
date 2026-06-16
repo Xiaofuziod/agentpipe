@@ -1,0 +1,18 @@
+version: 1
+name: "<已有改动的 Codex 审查>"
+target: <目标仓库绝对路径>
+mode: auto
+steps:
+  - id: codex-loop
+    kind: loop
+    until: codex-clean
+    max: 5
+    body:
+      - id: review
+        kind: codex
+        action: review-mr
+        base: dev
+      - id: fix
+        kind: claude
+        allow_writes: true
+        prompt: "按 Codex 反馈修改并提交:{{review.findings}}"

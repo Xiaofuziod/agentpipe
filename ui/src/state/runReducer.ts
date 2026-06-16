@@ -78,5 +78,8 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
       return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.max, result: "到上限未干净" } } };
     case "RunFinished":
       return { ...prev, runStatus: e.status, activeGate: null, log: pushLog(prev.log, `■ ${e.status}`) };
+    default:
+      // 未知事件(版本错配 / 引擎新增类型):原样返回,绝不返回 undefined 让 state 损坏
+      return prev;
   }
 }

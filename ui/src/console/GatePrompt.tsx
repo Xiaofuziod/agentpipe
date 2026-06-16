@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { GateView } from "../state/runReducer";
 import { ipc } from "../ipc";
 import type { EngineCommand } from "../types";
@@ -6,6 +6,14 @@ import type { EngineCommand } from "../types";
 export function GatePrompt({ gate }: { gate: GateView }) {
   const [artifact, setArtifact] = useState("");
   const [sent, setSent] = useState(false); // 发后禁用,防双击把多余指令灌给下一个 gate
+
+  // 每来一个新 gate(reducer 每次 StepAwaitingGate 都新建 activeGate 对象)就重置。
+  // 不能只靠 Console 的 key remount:同 step 同 kind 的连续 decision gate key 相同、不 remount,
+  // 否则二次失败时按钮会一直禁用,用户卡死。
+  useEffect(() => {
+    setSent(false);
+    setArtifact("");
+  }, [gate]);
 
   const send = (cmd: EngineCommand) => {
     if (sent) return;

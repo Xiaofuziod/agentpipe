@@ -39,4 +39,20 @@ describe("runReducer", () => {
     s = runReducer(s, { type: "StepProgress", step_id: "x", line: "hello" });
     expect(s.log.some((l) => l.includes("hello"))).toBe(true);
   });
+
+  it("returns prev state (never undefined) for an unknown event type", () => {
+    const s = initialRunState();
+    // 模拟版本错配:引擎发来 UI 类型里没有的事件
+    const next = runReducer(s, { type: "FutureEvent" } as unknown as Parameters<typeof runReducer>[1]);
+    expect(next).toBe(s);
+  });
+
+  it("caps the log so it cannot grow unbounded", () => {
+    let s = initialRunState();
+    for (let i = 0; i < 1200; i++) {
+      s = runReducer(s, { type: "StepProgress", step_id: "x", line: `line-${i}` });
+    }
+    expect(s.log.length).toBeLessThanOrEqual(1000);
+    expect(s.log[s.log.length - 1]).toContain("line-1199");
+  });
 });

@@ -123,7 +123,9 @@ pub fn run_command(
                         }
                         let _ = child.wait();
                         clear(control);
-                        let _ = reader.join(); // 组已杀,孙辈不再持有管道,join 不会卡
+                        // 不 join reader:若孙辈逃出进程组 / killpg 失败,管道不会 EOF,
+                        // join 会永久挂死引擎线程。超时输出本就丢弃,best-effort drain 已到的行,
+                        // reader 线程在 line_rx drop 后自行结束(分离)。
                         drain(&line_rx, &mut full, on_line);
                         break false; // 超时按失败
                     }

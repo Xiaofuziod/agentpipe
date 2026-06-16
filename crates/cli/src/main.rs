@@ -101,7 +101,15 @@ fn prompt_gate(step_id: &str, expects_artifact: bool) -> Command {
     print!("    > {hint} ");
     let _ = std::io::stdout().flush();
     let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line).ok();
+    let n = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
+    // read_line 返回 0 = EOF(stdin 关闭 / 管道结束 / Ctrl-D):无人在回路,
+    // fail-closed 跳过该步,绝不静默自动批准(尤其 allow_writes 步骤)。
+    if n == 0 {
+        eprintln!("    (stdin 已结束,跳过 '{step_id}')");
+        return Command::SkipStep {
+            step_id: step_id.to_string(),
+        };
+    }
     let line = line.trim();
     if line.starts_with('s') {
         Command::SkipStep {

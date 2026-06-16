@@ -109,6 +109,17 @@ impl Manifest {
                         step.id
                     )));
                 }
+                // codex-clean 的收敛判据取 body 里 codex step 的 verdict;无则永不收敛,
+                // 必然空转到 max,属配置错误,提前拒绝而非静默 runaway。
+                if !body
+                    .iter()
+                    .any(|s| matches!(s.kind, StepKind::Codex { .. }))
+                {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': until codex-clean 的 loop body 必须含至少一个 codex step",
+                        step.id
+                    )));
+                }
                 for s in body {
                     Self::validate_step(s)?;
                 }

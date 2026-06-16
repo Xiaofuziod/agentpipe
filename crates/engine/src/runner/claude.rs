@@ -17,11 +17,13 @@ impl ClaudeRunner {
     }
 
     /// allow_writes 决定权限姿态(确切 flag 以 Task 1 实测为准,这里给默认形态)。
+    /// timeout_secs 透传到 run_command,防止 claude 挂死拖垮流水线。
     pub fn run(
         &self,
         prompt: &str,
         skill: Option<&str>,
         allow_writes: bool,
+        timeout_secs: Option<u64>,
         cwd: &Path,
     ) -> Result<ClaudeOutcome, EngineError> {
         let full_prompt = match skill {
@@ -34,7 +36,7 @@ impl ClaudeRunner {
             args.push("--permission-mode".into());
             args.push("acceptEdits".into());
         }
-        let (stdout, success) = run_command(&self.bin, &args, cwd)?;
+        let (stdout, success) = run_command(&self.bin, &args, cwd, None, timeout_secs)?;
         if !success {
             return Err(EngineError::Cli("claude 非零退出".into()));
         }

@@ -52,46 +52,66 @@ impl CodexRunner {
         let out_str = out_file.to_string_lossy().to_string();
         let schema = write_schema()?;
 
-        let args: Vec<String> = match action {
-            CodexAction::ReviewMr => vec![
-                "exec".into(),
-                "review".into(),
-                "--base".into(),
-                base.unwrap_or("dev").into(),
-                "--output-schema".into(),
-                schema.clone(),
-                "-o".into(),
-                out_str.clone(),
-                "-s".into(),
-                "read-only".into(),
-            ],
-            CodexAction::ReviewDoc => vec![
-                "exec".into(),
-                "-s".into(),
-                "read-only".into(),
-                "--output-schema".into(),
-                schema.clone(),
-                "-o".into(),
-                out_str.clone(),
-                format!("审查设计文档 {} 并按 schema 输出结论", doc_path.unwrap_or("")),
-            ],
-            CodexAction::Ask => vec![
-                "exec".into(),
-                "-s".into(),
-                "read-only".into(),
-                "-o".into(),
-                out_str.clone(),
-                ask_prompt.unwrap_or("").into(),
-            ],
+        // review-doc 把文档内容经 stdin 喂给 codex(spec 7.2);其余 action 无 stdin。
+        let (args, stdin): (Vec<String>, Option<String>) = match action {
+            CodexAction::ReviewMr => (
+                vec![
+                    "exec".into(),
+                    "review".into(),
+                    "--base".into(),
+                    base.unwrap_or("dev").into(),
+                    "--output-schema".into(),
+                    schema.clone(),
+                    "-o".into(),
+                    out_str.clone(),
+                    "-s".into(),
+                    "read-only".into(),
+                ],
+                None,
+            ),
+            CodexAction::ReviewDoc => {
+                let rel = doc_path.unwrap_or("");
+                let content = std::fs::read_to_string(cwd.join(rel)).unwrap_or_default();
+                (
+                    vec![
+                        "exec".into(),
+                        "-s".into(),
+                        "read-only".into(),
+                        "--output-schema".into(),
+                        schema.clone(),
+                        "-o".into(),
+                        out_str.clone(),
+                        format!("审查随附设计文档 {rel} 并按 schema 输出 verdict/findings"),
+                    ],
+                    Some(content),
+                )
+            }
+            CodexAction::Ask => (
+                vec![
+                    "exec".into(),
+                    "-s".into(),
+                    "read-only".into(),
+                    "-o".into(),
+                    out_str.clone(),
+                    ask_prompt.unwrap_or("").into(),
+                ],
+                None,
+            ),
         };
 
-        run_command(&self.bin, &args, cwd)?;
+        run_command(&self.bin, &args, cwd, stdin.as_deref(), None)?;
         Ok(parse_review(&out_file))
     }
 }
 
 fn write_schema() -> Result<String, EngineError> {
-    let path = std::env::temp_dir().join("agentpipe-review-schema.json");
+    // 按进程 + 序号命名,避免并发进程在同一固定路径上半写竞态。
+    let seq = OUT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "agentpipe-review-schema-{}-{}.json",
+        std::process::id(),
+        seq
+    ));
     std::fs::write(&path, REVIEW_SCHEMA)?;
     Ok(path.to_string_lossy().to_string())
 }

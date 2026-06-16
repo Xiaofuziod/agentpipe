@@ -116,6 +116,7 @@ impl Executor {
                 let path_i = path.as_ref().map(|p| self.ctx.interpolate(p));
                 let base_i = base.as_ref().map(|b| self.ctx.interpolate(b));
                 let prompt_i = prompt.as_ref().map(|p| self.ctx.interpolate(p));
+                let mut on_line = self.progress_sink(&step.id);
                 loop {
                     let res = self.codex.review(
                         action,
@@ -123,6 +124,7 @@ impl Executor {
                         base_i.as_deref(),
                         prompt_i.as_deref(),
                         Some(self.control.as_ref()),
+                        &mut on_line,
                         &self.ctx.cwd,
                     );
                     match res {
@@ -149,6 +151,7 @@ impl Executor {
             }
             StepKind::Claude { prompt, skill, allow_writes, timeout } => {
                 let p = self.ctx.interpolate(prompt);
+                let mut on_line = self.progress_sink(&step.id);
                 loop {
                     let res = self.claude.run(
                         &p,
@@ -156,6 +159,7 @@ impl Executor {
                         *allow_writes,
                         *timeout,
                         Some(self.control.as_ref()),
+                        &mut on_line,
                         &self.ctx.cwd,
                     );
                     match res {
@@ -275,6 +279,18 @@ impl Executor {
             }
         }
         false // 没找到 codex step → fail-closed 不收敛
+    }
+
+    /// 生成一个把 CLI 输出行转成 StepProgress 事件的回调(克隆 events,不借 self)。
+    fn progress_sink(&self, step_id: &str) -> impl FnMut(&str) {
+        let events = self.events.clone();
+        let sid = step_id.to_string();
+        move |line: &str| {
+            let _ = events.send(Event::StepProgress {
+                step_id: sid.clone(),
+                line: line.to_string(),
+            });
+        }
     }
 
     fn finish(&self, step_id: &str, summary: String) {

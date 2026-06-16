@@ -1,6 +1,6 @@
 use crate::context::{RunContext, StepOutput, Verdict};
 use crate::manifest::{Manifest, RunMode, Step, StepKind};
-use crate::protocol::{Command, Event, RunStatus, StepStatus};
+use crate::protocol::{Command, Event, GateKind, RunStatus, StepStatus};
 use crate::runner::claude::ClaudeRunner;
 use crate::runner::codex::CodexRunner;
 use std::sync::mpsc::{Receiver, Sender};
@@ -66,6 +66,7 @@ impl Executor {
                 step_id: step.id.clone(),
                 suggestion: format!("即将执行 step '{}'", step.id),
                 expects_artifact: false,
+                gate_kind: GateKind::Step,
             });
             match self.commands.recv() {
                 Ok(Command::ApproveGate { .. }) => {}
@@ -167,6 +168,7 @@ impl Executor {
             step_id: step.id.clone(),
             suggestion: instruction.to_string(),
             expects_artifact,
+            gate_kind: GateKind::Human,
         });
         match self.commands.recv() {
             Ok(Command::ApproveGate { artifact, .. }) => {

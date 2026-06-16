@@ -1,10 +1,8 @@
 use crate::bridge;
 use crate::state::{ActiveRun, AppState};
-use agentpipe_engine::control::Control;
 use agentpipe_engine::executor::RunnerBins;
 use agentpipe_engine::manifest::Manifest;
 use agentpipe_engine::protocol::Command;
-use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 fn runner_bins() -> RunnerBins {
@@ -28,12 +26,10 @@ pub fn start_run(app: AppHandle, state: State<AppState>, path: String) -> Result
     let manifest = Manifest::parse(&yaml).map_err(|e| e.to_string())?;
     manifest.validate().map_err(|e| e.to_string())?;
 
-    // Control 在 Task 6 接入引擎;此处先建并存,供后续 Abort 使用
-    let control = Arc::new(Control::default());
     let started = bridge::start(app, manifest, runner_bins());
     *active = Some(ActiveRun {
         commands: started.commands,
-        control,
+        control: started.control,
     });
     Ok(())
 }
@@ -42,7 +38,13 @@ pub fn start_run(app: AppHandle, state: State<AppState>, path: String) -> Result
 pub fn send_command(state: State<AppState>, cmd: Command) -> Result<(), String> {
     let active = state.active.lock().unwrap();
     match active.as_ref() {
-        Some(run) => run.commands.send(cmd).map_err(|e| e.to_string()),
+        Some(run) => {
+            // Abort 必须同时杀进程(request_abort)+ 送 channel(解开正等 gate 的 recv)。
+            if matches!(cmd, Command::Abort) {
+                run.control.request_abort();
+            }
+            run.commands.send(cmd).map_err(|e| e.to_string())
+        }
         None => Err("没有运行中的 Run".into()),
     }
 }

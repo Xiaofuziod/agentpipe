@@ -1,13 +1,18 @@
+use agentpipe_engine::control::Control;
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
 use agentpipe_engine::protocol::{Command, Event, RunStatus};
 use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn fixture(name: &str) -> String {
     format!("{}/../../tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
+}
+
+fn test_control() -> Arc<Control> {
+    Arc::new(Control::default())
 }
 
 fn stub_bins() -> RunnerBins {
@@ -39,7 +44,7 @@ steps:
     let (etx, erx) = mpsc::channel();
     let (_ctx, crx) = mpsc::channel::<Command>();
 
-    let mut ex = Executor::new(m, stub_bins(), etx, crx);
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
     let status = ex.run();
 
     assert_eq!(status, RunStatus::Success);
@@ -80,7 +85,7 @@ steps:
     let m = Manifest::parse(yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (_c, crx) = mpsc::channel::<Command>();
-    let mut ex = Executor::new(m, stub_bins(), etx, crx);
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
     ex.run();
     let events: Vec<_> = erx.try_iter().collect();
     assert!(events
@@ -111,7 +116,7 @@ steps:
     let m = Manifest::parse(yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (_c, crx) = mpsc::channel::<Command>();
-    let mut ex = Executor::new(m, stub_bins(), etx, crx);
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
     ex.run();
     let events: Vec<_> = erx.try_iter().collect();
     assert!(events
@@ -144,7 +149,7 @@ steps:
             artifact: None,
         })
         .unwrap();
-    let mut ex = Executor::new(m, stub_bins(), etx, crx);
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
     ex.run();
     let events: Vec<_> = erx.try_iter().collect();
     assert!(events

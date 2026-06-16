@@ -20,7 +20,7 @@ fn parses_changes_requested() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "changes_requested");
     let r = stub()
-        .review(&CodexAction::ReviewMr, None, Some("dev"), None, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("dev"), None, None, &PathBuf::from("."))
         .expect("review ok");
     assert_eq!(r.verdict, Verdict::ChangesRequested);
     assert!(r.findings.contains("示例问题"));
@@ -31,7 +31,7 @@ fn parses_clean() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "clean");
     let r = stub()
-        .review(&CodexAction::ReviewMr, None, Some("dev"), None, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("dev"), None, None, &PathBuf::from("."))
         .unwrap();
     assert_eq!(r.verdict, Verdict::Clean);
 }
@@ -42,7 +42,7 @@ fn unparseable_output_is_changes_requested() {
     // 注入会产出非法 JSON 的 verdict,校验 fail-closed
     std::env::set_var("STUB_VERDICT", "\"broken");
     let r = stub()
-        .review(&CodexAction::ReviewMr, None, Some("dev"), None, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("dev"), None, None, &PathBuf::from("."))
         .unwrap();
     assert_eq!(r.verdict, Verdict::ChangesRequested);
 }

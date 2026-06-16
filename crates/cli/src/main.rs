@@ -39,8 +39,9 @@ fn main() {
     let (etx, erx) = mpsc::channel::<Event>();
     let (ctx, crx) = mpsc::channel::<Command>();
 
+    let control = std::sync::Arc::new(agentpipe_engine::control::Control::default());
     let handle = thread::spawn(move || {
-        let mut ex = Executor::new(manifest, bins, etx, crx);
+        let mut ex = Executor::new(manifest, bins, control, etx, crx);
         ex.run()
     });
 

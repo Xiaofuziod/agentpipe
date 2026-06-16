@@ -1,4 +1,5 @@
 use super::run_command;
+use crate::control::Control;
 use crate::context::Verdict;
 use crate::error::EngineError;
 use crate::manifest::CodexAction;
@@ -44,6 +45,7 @@ impl CodexRunner {
         doc_path: Option<&str>,
         base: Option<&str>,
         ask_prompt: Option<&str>,
+        control: Option<&Control>,
         cwd: &Path,
     ) -> Result<ReviewResult, EngineError> {
         let seq = OUT_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -104,7 +106,7 @@ impl CodexRunner {
             ),
         };
 
-        run_command(&self.bin, &args, cwd, stdin.as_deref(), None)?;
+        run_command(&self.bin, &args, cwd, stdin.as_deref(), None, control)?;
         Ok(parse_review(&out_file))
     }
 }

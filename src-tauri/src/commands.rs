@@ -70,11 +70,13 @@ pub fn list_templates() -> Result<Vec<String>, String> {
     Ok(names)
 }
 
+/// 解析模板 YAML 返回 Manifest(webview 无 YAML 解析器,复用 Rust serde)。
 #[tauri::command]
-pub fn load_template(name: String) -> Result<String, String> {
+pub fn load_template(name: String) -> Result<Manifest, String> {
     if name.contains('/') || name.contains("..") {
         return Err("非法模板名".into());
     }
     let p = templates_dir().join(format!("{name}.yaml"));
-    std::fs::read_to_string(&p).map_err(|e| e.to_string())
+    let yaml = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
+    Manifest::parse(&yaml).map_err(|e| e.to_string())
 }

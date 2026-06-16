@@ -39,6 +39,7 @@ impl CodexRunner {
     }
 
     /// 返回 ReviewResult。解析失败一律 fail-closed 为 ChangesRequested。
+    #[allow(clippy::too_many_arguments)]
     pub fn review(
         &self,
         action: &CodexAction,
@@ -46,6 +47,7 @@ impl CodexRunner {
         base: Option<&str>,
         ask_prompt: Option<&str>,
         control: Option<&Control>,
+        on_line: &mut dyn FnMut(&str),
         cwd: &Path,
     ) -> Result<ReviewResult, EngineError> {
         let seq = OUT_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -106,7 +108,7 @@ impl CodexRunner {
             ),
         };
 
-        run_command(&self.bin, &args, cwd, stdin.as_deref(), None, control)?;
+        run_command(&self.bin, &args, cwd, stdin.as_deref(), None, control, on_line)?;
         Ok(parse_review(&out_file))
     }
 }

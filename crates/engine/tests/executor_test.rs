@@ -60,6 +60,34 @@ steps:
 }
 
 #[test]
+fn emits_step_progress_from_cli_stdout() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("STUB_VERDICT", "clean");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: rev
+    kind: codex
+    action: review-mr
+    base: dev
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_c, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    ex.run();
+    let events: Vec<Event> = erx.try_iter().collect();
+    // stub-codex.sh 末尾 echo "stub codex done" → 应转成 StepProgress
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::StepProgress { line, .. } if line.contains("stub codex done")
+    )));
+}
+
+#[test]
 fn loop_converges_when_codex_clean() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "clean");

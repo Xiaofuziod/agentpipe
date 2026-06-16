@@ -19,6 +19,7 @@ impl ClaudeRunner {
 
     /// allow_writes 决定权限姿态(确切 flag 以 Task 1 实测为准,这里给默认形态)。
     /// timeout_secs 透传到 run_command,防止 claude 挂死拖垮流水线。
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         prompt: &str,
@@ -26,6 +27,7 @@ impl ClaudeRunner {
         allow_writes: bool,
         timeout_secs: Option<u64>,
         control: Option<&Control>,
+        on_line: &mut dyn FnMut(&str),
         cwd: &Path,
     ) -> Result<ClaudeOutcome, EngineError> {
         let full_prompt = match skill {
@@ -39,7 +41,8 @@ impl ClaudeRunner {
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }
-        let (stdout, success) = run_command(&self.bin, &args, cwd, None, timeout_secs, control)?;
+        let (stdout, success) =
+            run_command(&self.bin, &args, cwd, None, timeout_secs, control, on_line)?;
         if !success {
             return Err(EngineError::Cli("claude 非零退出".into()));
         }

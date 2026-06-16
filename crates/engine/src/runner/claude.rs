@@ -1,4 +1,5 @@
 use super::run_command;
+use crate::control::Control;
 use crate::error::EngineError;
 use std::path::Path;
 
@@ -24,6 +25,7 @@ impl ClaudeRunner {
         skill: Option<&str>,
         allow_writes: bool,
         timeout_secs: Option<u64>,
+        control: Option<&Control>,
         cwd: &Path,
     ) -> Result<ClaudeOutcome, EngineError> {
         let full_prompt = match skill {
@@ -37,7 +39,7 @@ impl ClaudeRunner {
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }
-        let (stdout, success) = run_command(&self.bin, &args, cwd, None, timeout_secs)?;
+        let (stdout, success) = run_command(&self.bin, &args, cwd, None, timeout_secs, control)?;
         if !success {
             return Err(EngineError::Cli("claude 非零退出".into()));
         }

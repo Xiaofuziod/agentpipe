@@ -18,14 +18,15 @@ fn templates_dir() -> std::path::PathBuf {
 
 #[tauri::command]
 pub fn start_run(app: AppHandle, state: State<AppState>, path: String) -> Result<(), String> {
-    let mut active = state.active.lock().unwrap();
-    if active.is_some() {
-        return Err("已有运行中的 Run,请先结束".into());
-    }
+    // 读/解析/校验在锁外做,不持 AppState 锁跨阻塞 I/O(避免阻塞 send_command / 清理)
     let yaml = std::fs::read_to_string(&path).map_err(|e| format!("读取 {path} 失败: {e}"))?;
     let manifest = Manifest::parse(&yaml).map_err(|e| e.to_string())?;
     manifest.validate().map_err(|e| e.to_string())?;
 
+    let mut active = state.active.lock().unwrap();
+    if active.is_some() {
+        return Err("已有运行中的 Run,请先结束".into());
+    }
     let started = bridge::start(app, manifest, runner_bins());
     *active = Some(ActiveRun {
         commands: started.commands,

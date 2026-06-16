@@ -1,4 +1,5 @@
 import { useEffect, useReducer, useRef } from "react";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import { ipc } from "../ipc";
 import { runReducer, initialRunState } from "../state/runReducer";
 import type { StepStatus } from "../types";
@@ -17,18 +18,26 @@ export function Console({ runPath }: { runPath: string | null }) {
   const [state, dispatch] = useReducer(runReducer, undefined, initialRunState);
   const started = useRef(false);
 
+  // 单一 effect:先注册事件监听,确认就绪后再 startRun,避免丢早期事件(RunStarted/首步)。
+  // cancelled 标志 + StrictMode 双挂载安全:首挂载的监听在解析后被清理,不会双份。
   useEffect(() => {
-    const un = ipc.onEngineEvent(dispatch);
+    let unlisten: UnlistenFn | null = null;
+    let cancelled = false;
+    ipc.onEngineEvent(dispatch).then((un) => {
+      if (cancelled) {
+        un();
+        return;
+      }
+      unlisten = un;
+      if (runPath && !started.current) {
+        started.current = true;
+        ipc.startRun(runPath).catch((e) => alert(String(e)));
+      }
+    });
     return () => {
-      un.then((f) => f());
+      cancelled = true;
+      if (unlisten) unlisten();
     };
-  }, []);
-
-  useEffect(() => {
-    if (runPath && !started.current) {
-      started.current = true;
-      ipc.startRun(runPath).catch((e) => alert(String(e)));
-    }
   }, [runPath]);
 
   return (
@@ -50,7 +59,12 @@ export function Console({ runPath }: { runPath: string | null }) {
         ))}
       </div>
 
-      {state.activeGate && <GatePrompt gate={state.activeGate} />}
+      {state.activeGate && (
+        <GatePrompt
+          key={`${state.activeGate.step_id}:${state.activeGate.gate_kind}`}
+          gate={state.activeGate}
+        />
+      )}
 
       <div style={{ marginTop: 10 }}>
         {!state.runStatus && (

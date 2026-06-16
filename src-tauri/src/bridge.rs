@@ -25,15 +25,13 @@ pub fn start(app: AppHandle, manifest: Manifest, bins: RunnerBins) -> Started {
     let forward_app = app.clone();
     thread::spawn(move || {
         for evt in event_rx {
-            let is_final = matches!(evt, Event::RunFinished { .. });
             let _ = forward_app.emit(EVENT_CHANNEL, evt);
-            if is_final {
-                if let Some(st) = forward_app.try_state::<crate::state::AppState>() {
-                    *st.active.lock().unwrap() = None;
-                }
-            }
         }
-        // event_tx 在引擎线程结束时 drop → 本循环退出
+        // event_rx 关闭 = 引擎线程结束(正常 RunFinished 后返回,或 panic)。
+        // 一律清空 active —— 不能只在 RunFinished 上清,否则引擎 panic 时会永久卡住单 Run 不变式。
+        if let Some(st) = forward_app.try_state::<crate::state::AppState>() {
+            *st.active.lock().unwrap() = None;
+        }
     });
 
     // 引擎线程

@@ -89,23 +89,41 @@ pub fn run_command(
         }
     };
 
+    let clear = |control: Option<&Control>| {
+        if let Some(c) = control {
+            c.set_current(None);
+        }
+    };
     let deadline = timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
     let success = loop {
         drain(&line_rx, &mut full, on_line);
-        match child
-            .try_wait()
-            .map_err(|e| EngineError::Cli(e.to_string()))?
-        {
-            Some(status) => {
+        match child.try_wait() {
+            Err(e) => {
+                clear(control);
+                return Err(EngineError::Cli(e.to_string()));
+            }
+            Ok(Some(status)) => {
+                // 立即清 pgid:子进程已被 reap,其 pid 可能被 OS 复用,缩小 killpg 误伤窗口
+                clear(control);
                 let _ = reader.join(); // 等 reader 读完剩余行
                 drain(&line_rx, &mut full, on_line);
                 break status.success();
             }
-            None => {
+            Ok(None) => {
                 if let Some(dl) = deadline {
                     if Instant::now() >= dl {
-                        let _ = child.kill();
+                        // 杀整个进程组(含 shell 起的孙辈),不是只杀直接子进程
+                        #[cfg(unix)]
+                        unsafe {
+                            libc::killpg(child.id() as i32, libc::SIGKILL);
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            let _ = child.kill();
+                        }
                         let _ = child.wait();
+                        clear(control);
+                        let _ = reader.join(); // 组已杀,孙辈不再持有管道,join 不会卡
                         drain(&line_rx, &mut full, on_line);
                         break false; // 超时按失败
                     }
@@ -114,9 +132,5 @@ pub fn run_command(
             }
         }
     };
-
-    if let Some(c) = control {
-        c.set_current(None);
-    }
     Ok((full, success))
 }

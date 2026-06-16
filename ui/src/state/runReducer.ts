@@ -18,8 +18,10 @@ export interface RunState {
   loops: Record<string, { iteration: number; result?: string }>;
   activeGate: GateView | null;
   runStatus: RunStatus | null;
-  log: string[]; // 人读流水
+  log: string[]; // 人读流水(封顶,见 LOG_CAP)
 }
+
+const LOG_CAP = 1000;
 
 export const initialRunState = (): RunState => ({
   name: "",
@@ -31,62 +33,50 @@ export const initialRunState = (): RunState => ({
   log: [],
 });
 
-function touch(s: RunState, id: string, patch: Partial<StepView>) {
-  if (!s.order.includes(id)) s.order.push(id);
-  const existing: StepView = s.steps[id] ?? { status: "Pending" };
-  s.steps[id] = { ...existing, ...patch };
+function pushLog(log: string[], line: string): string[] {
+  const next = [...log, line];
+  return next.length > LOG_CAP ? next.slice(-LOG_CAP) : next;
+}
+
+// 只复制被改的 steps/order 切片,其余切片按引用复用(避免每事件全量复制 → O(n^2))。
+function setStep(prev: RunState, id: string, patch: Partial<StepView>): Pick<RunState, "steps" | "order"> {
+  const existing: StepView = prev.steps[id] ?? { status: "Pending" };
+  return {
+    steps: { ...prev.steps, [id]: { ...existing, ...patch } },
+    order: prev.order.includes(id) ? prev.order : [...prev.order, id],
+  };
 }
 
 export function runReducer(prev: RunState, e: EngineEvent): RunState {
-  const s: RunState = {
-    ...prev,
-    steps: { ...prev.steps },
-    loops: { ...prev.loops },
-    order: [...prev.order],
-    log: [...prev.log],
-  };
   switch (e.type) {
     case "RunStarted":
-      s.name = e.name;
-      s.log.push(`▶ ${e.name}`);
-      break;
-    case "StepStarted":
-      touch(s, e.step_id, { status: "Running" });
-      s.activeGate = null;
-      break;
+      return { ...prev, name: e.name, log: pushLog(prev.log, `▶ ${e.name}`) };
     case "StepProgress":
-      s.log.push(`  ${e.line}`);
-      break;
+      return { ...prev, log: pushLog(prev.log, `  ${e.line}`) };
+    case "StepStarted":
+      return { ...prev, ...setStep(prev, e.step_id, { status: "Running" }), activeGate: null };
     case "StepAwaitingGate":
-      touch(s, e.step_id, { status: "AwaitingGate" });
-      s.activeGate = {
-        step_id: e.step_id,
-        suggestion: e.suggestion,
-        expects_artifact: e.expects_artifact,
-        gate_kind: e.gate_kind,
+      return {
+        ...prev,
+        ...setStep(prev, e.step_id, { status: "AwaitingGate" }),
+        activeGate: {
+          step_id: e.step_id,
+          suggestion: e.suggestion,
+          expects_artifact: e.expects_artifact,
+          gate_kind: e.gate_kind,
+        },
       };
-      break;
     case "StepFinished":
-      touch(s, e.step_id, { status: e.status, summary: e.summary });
-      s.activeGate = null;
-      break;
+      return { ...prev, ...setStep(prev, e.step_id, { status: e.status, summary: e.summary }), activeGate: null };
     case "StepFailed":
-      touch(s, e.step_id, { status: "Failed", error: e.error });
-      break;
+      return { ...prev, ...setStep(prev, e.step_id, { status: "Failed", error: e.error }) };
     case "LoopIteration":
-      s.loops[e.loop_id] = { iteration: e.iteration };
-      break;
+      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iteration } } };
     case "LoopConverged":
-      s.loops[e.loop_id] = { iteration: e.iterations, result: "收敛" };
-      break;
+      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iterations, result: "收敛" } } };
     case "LoopMaxReached":
-      s.loops[e.loop_id] = { iteration: e.max, result: "到上限未干净" };
-      break;
+      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.max, result: "到上限未干净" } } };
     case "RunFinished":
-      s.runStatus = e.status;
-      s.activeGate = null;
-      s.log.push(`■ ${e.status}`);
-      break;
+      return { ...prev, runStatus: e.status, activeGate: null, log: pushLog(prev.log, `■ ${e.status}`) };
   }
-  return s;
 }

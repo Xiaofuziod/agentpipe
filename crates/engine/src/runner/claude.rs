@@ -32,9 +32,10 @@ impl ClaudeRunner {
         };
         let mut args = vec!["-p".to_string(), full_prompt];
         if allow_writes {
-            // 占位:Task 1 实测确认确切 flag 后替换
+            // 实测:bypassPermissions 才能让 headless claude 自主 edit + bash(提交需要),
+            // acceptEdits 只放行编辑、挡 bash。见 docs/specs/cli-behavior-findings.md。
             args.push("--permission-mode".into());
-            args.push("acceptEdits".into());
+            args.push("bypassPermissions".into());
         }
         let (stdout, success) = run_command(&self.bin, &args, cwd, None, timeout_secs)?;
         if !success {

@@ -5,6 +5,7 @@ import type { Manifest, EngineEvent, EngineCommand } from "./types";
 
 export const ipc = {
   startRun: (path: string) => invoke<void>("start_run", { path }),
+  startRunInline: (manifest: Manifest) => invoke<void>("start_run_inline", { manifest }),
   sendCommand: (cmd: EngineCommand) => invoke<void>("send_command", { cmd }),
   saveManifest: (manifest: Manifest, path: string) => invoke<void>("save_manifest", { manifest, path }),
   listTemplates: () => invoke<string[]>("list_templates"),

@@ -1,17 +1,25 @@
 import { useEffect, useState } from "react";
 import type { Manifest, Step } from "../types";
 import { ipc } from "../ipc";
-import { StepCard } from "./StepCard";
+import { StepRow } from "./StepCard";
+import { StepDrawer } from "./StepDrawer";
 
 const emptyStep = (id: string): Step => ({ id, kind: "claude", prompt: "" });
 const emptyManifest = (): Manifest => ({ version: 1, name: "", target: "", mode: "step", steps: [] });
 
-export function Composer({ onRun }: { onRun: (path: string) => void }) {
+export function Composer({
+  target,
+  onRun,
+}: {
+  target: string | null;
+  onRun: (path: string) => void;
+}) {
   const [m, setM] = useState<Manifest>(emptyManifest);
   const [savePath, setSavePath] = useState("");
   const [templates, setTemplates] = useState<string[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
+  const [editing, setEditing] = useState<number | null>(null);
 
   useEffect(() => {
     ipc.listTemplates().then(setTemplates).catch(() => setTemplates([]));
@@ -19,8 +27,14 @@ export function Composer({ onRun }: { onRun: (path: string) => void }) {
 
   const update = (patch: Partial<Manifest>) => setM({ ...m, ...patch });
   const setStep = (i: number, s: Step) => update({ steps: m.steps.map((x, j) => (j === i ? s : x)) });
-  const addStep = () => update({ steps: [...m.steps, emptyStep(`step-${m.steps.length + 1}`)] });
-  const delStep = (i: number) => update({ steps: m.steps.filter((_, j) => j !== i) });
+  const addStep = () => {
+    update({ steps: [...m.steps, emptyStep(`step-${m.steps.length + 1}`)] });
+    setEditing(m.steps.length);
+  };
+  const delStep = (i: number) => {
+    update({ steps: m.steps.filter((_, j) => j !== i) });
+    setEditing(null);
+  };
   const move = (i: number, d: -1 | 1) => {
     const j = i + d;
     if (j < 0 || j >= m.steps.length) return;
@@ -39,92 +53,140 @@ export function Composer({ onRun }: { onRun: (path: string) => void }) {
     }
   };
 
-  const hasAutoWrites = m.mode === "auto" && hasAllowWrites(m.steps);
-
-  const save = async () => {
+  // 全应用单一 target(在控制台下方选择)注入 manifest 后再落盘
+  const persist = async (): Promise<boolean> => {
     setErr(null);
     setOk(null);
     if (!savePath) {
       setErr("请填保存路径");
-      return;
+      return false;
+    }
+    if (!target) {
+      setErr("请先在控制台下方选择 target 仓库");
+      return false;
     }
     try {
-      await ipc.saveManifest(m, savePath);
-      setOk("已保存");
+      await ipc.saveManifest({ ...m, target }, savePath);
+      return true;
     } catch (e) {
       setErr(String(e));
+      return false;
     }
   };
 
+  const save = async () => {
+    if (await persist()) setOk("已保存");
+  };
+
+  // 运行 = 先按当前编辑 + target 落盘,再跑该文件,保证跑的就是屏幕上的内容
+  const run = async () => {
+    if (await persist()) onRun(savePath);
+  };
+
   return (
-    <div style={{ padding: 12, fontFamily: "system-ui", maxWidth: 720 }}>
-      <h3>编排</h3>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <input placeholder="任务名" value={m.name} onChange={(e) => update({ name: e.target.value })} />
-        <button
-          onClick={async () => {
-            const d = await ipc.pickDir();
-            if (d) update({ target: d });
-          }}
-        >
-          target:{m.target || "(未选)"}
-        </button>
-        <select value={m.mode} onChange={(e) => update({ mode: e.target.value as Manifest["mode"] })}>
-          <option value="step">step(逐步批准)</option>
-          <option value="auto">auto(自动跑)</option>
-        </select>
-        <select defaultValue="" onChange={(e) => loadTemplate(e.target.value)}>
-          <option value="">从模板新建…</option>
-          {templates.map((t) => (
-            <option key={t} value={t}>
-              {t}
-            </option>
-          ))}
-        </select>
+    <div className="pane-body">
+      {/* 任务级设置 */}
+      <div className="card">
+        <div className="row" style={{ flexWrap: "nowrap" }}>
+          <div className="field" style={{ flex: 1, minWidth: 0 }}>
+            <label className="label">模式</label>
+            <select
+              className="select"
+              value={m.mode}
+              onChange={(e) => update({ mode: e.target.value as Manifest["mode"] })}
+            >
+              <option value="step">step(逐步批准)</option>
+              <option value="auto">auto(自动跑)</option>
+            </select>
+          </div>
+          <div className="field" style={{ flex: 1, minWidth: 0 }}>
+            <label className="label">从模板新建</label>
+            <select className="select" defaultValue="" onChange={(e) => loadTemplate(e.target.value)}>
+              <option value="">选择模板…</option>
+              {templates.map((t) => (
+                <option key={t} value={t}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+        {m.mode === "auto" && hasClaude(m.steps) && (
+          <div className="banner banner-warn">
+            <span>⚠</span>
+            <span>
+              auto 模式:claude 步骤将以 bypassPermissions 在 target 仓库完全自主写码,确认 target 可信。
+            </span>
+          </div>
+        )}
       </div>
 
-      {hasAutoWrites && (
-        <div style={{ color: "#b35900", marginTop: 6 }}>
-          ⚠ auto 模式 + allow_writes:claude 将以 bypassPermissions 在 target 仓库完全自主写码,确认 target 可信。
-        </div>
-      )}
-
-      <div style={{ marginTop: 8 }}>
+      {/* 步骤列表 — 紧凑行,点编辑进抽屉 */}
+      <h2 className="page-title" style={{ marginTop: 24, fontSize: 15 }}>
+        步骤 <span className="dim">{m.steps.length}</span>
+      </h2>
+      <div className="step-list">
         {m.steps.map((s, i) => (
-          <StepCard
+          <StepRow
             key={i}
             step={s}
-            onChange={(s2) => setStep(i, s2)}
+            seq={i + 1}
+            onEdit={() => setEditing(i)}
             onUp={() => move(i, -1)}
             onDown={() => move(i, 1)}
             onDelete={() => delStep(i)}
           />
         ))}
-        <button onClick={addStep}>+ 加步骤</button>
+        {m.steps.length === 0 && (
+          <div className="step-row" style={{ color: "var(--text-faint)", justifyContent: "center" }}>
+            还没有步骤,点下方添加
+          </div>
+        )}
       </div>
-
-      <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center" }}>
-        <input
-          placeholder="保存到 task.yaml 路径"
-          value={savePath}
-          onChange={(e) => setSavePath(e.target.value)}
-          style={{ flex: 1 }}
-        />
-        <button onClick={save}>保存</button>
-        <button onClick={() => onRun(savePath)} disabled={!savePath}>
-          运行
+      <div className="add-step">
+        <button className="btn" onClick={addStep}>
+          + 加步骤
         </button>
       </div>
-      {err && <div style={{ color: "red", marginTop: 6 }}>{err}</div>}
-      {ok && <div style={{ color: "green", marginTop: 6 }}>{ok}</div>}
+
+      {/* 保存 / 运行 */}
+      <div className="card" style={{ marginTop: 24 }}>
+        <div className="field">
+          <label className="label">保存到 task.yaml</label>
+          <div className="row" style={{ flexWrap: "nowrap" }}>
+            <input
+              className="input input-mono"
+              placeholder="~/tasks/my-task.yaml"
+              value={savePath}
+              onChange={(e) => setSavePath(e.target.value)}
+            />
+            <button className="btn" onClick={save}>
+              保存
+            </button>
+            <button className="btn btn-primary" onClick={run} disabled={!savePath}>
+              ▷ 运行
+            </button>
+          </div>
+        </div>
+        {err && <div className="banner banner-error">{err}</div>}
+        {ok && <div className="banner banner-ok">{ok}</div>}
+      </div>
+
+      {editing !== null && m.steps[editing] && (
+        <StepDrawer
+          step={m.steps[editing]}
+          onChange={(s) => setStep(editing, s)}
+          onClose={() => setEditing(null)}
+        />
+      )}
     </div>
   );
 }
 
-function hasAllowWrites(steps: Step[]): boolean {
+function hasClaude(steps: Step[]): boolean {
   return steps.some((s) => {
-    if (s.kind === "claude") return !!s.allow_writes;
-    if (s.kind === "loop") return hasAllowWrites(s.body);
+    if (s.kind === "claude") return true;
+    if (s.kind === "loop") return hasClaude(s.body);
     return false;
   });
 }

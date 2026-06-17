@@ -149,15 +149,13 @@ impl Executor {
                     }
                 }
             }
-            StepKind::Claude { prompt, skill, allow_writes, timeout } => {
+            StepKind::Claude { prompt, skill } => {
                 let p = self.ctx.interpolate(prompt);
                 let mut on_line = self.progress_sink(&step.id);
                 loop {
                     let res = self.claude.run(
                         &p,
                         skill.as_deref(),
-                        *allow_writes,
-                        *timeout,
                         Some(self.control.as_ref()),
                         &mut on_line,
                         &self.ctx.cwd,

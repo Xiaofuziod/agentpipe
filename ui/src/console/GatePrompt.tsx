@@ -29,28 +29,31 @@ export function GatePrompt({ gate }: { gate: GateView }) {
   const abort = () => send({ type: "Abort" });
 
   return (
-    <div style={{ border: "1px solid #888", borderRadius: 6, padding: 8, margin: "8px 0" }}>
-      <div>
-        ⏸ {gate.step_id}:{gate.suggestion}
+    <div className="gate">
+      <div className="gate-head">
+        <span>⏸</span>
+        <span className="step-id">{gate.step_id}</span>
+        <span>{gate.suggestion}</span>
       </div>
       {gate.expects_artifact && (
         <input
+          className="input input-mono"
           placeholder="产物(路径 / URL)"
           value={artifact}
           onChange={(e) => setArtifact(e.target.value)}
           disabled={sent}
-          style={{ margin: "6px 0", width: "100%" }}
+          style={{ marginBottom: 8 }}
         />
       )}
-      <div style={{ display: "flex", gap: 6 }}>
-        <button onClick={approve} disabled={sent}>
+      <div className="row">
+        <button className="btn btn-primary btn-sm" onClick={approve} disabled={sent}>
           {gate.gate_kind === "decision" ? "重试" : "批准"}
         </button>
-        <button onClick={skip} disabled={sent}>
+        <button className="btn btn-sm" onClick={skip} disabled={sent}>
           跳过
         </button>
         {gate.gate_kind === "decision" && (
-          <button onClick={abort} disabled={sent}>
+          <button className="btn btn-danger btn-sm" onClick={abort} disabled={sent}>
             中止
           </button>
         )}

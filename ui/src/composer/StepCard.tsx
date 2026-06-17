@@ -1,8 +1,8 @@
-import type { Step, StepKind, CodexAction } from "../types";
+import type { Step, StepKind } from "../types";
 
-const KINDS: StepKind["kind"][] = ["claude", "codex", "human", "loop"];
+export const KINDS: StepKind["kind"][] = ["claude", "codex", "human", "loop"];
 
-function defaultsFor(kind: StepKind["kind"]): StepKind {
+export function defaultsFor(kind: StepKind["kind"]): StepKind {
   switch (kind) {
     case "claude":
       return { kind: "claude", prompt: "" };
@@ -15,173 +15,92 @@ function defaultsFor(kind: StepKind["kind"]): StepKind {
   }
 }
 
-function Fields({ step, onChange }: { step: Step; onChange: (s: Step) => void }) {
+/** 一行可读摘要(主列表只显示概要,详情进抽屉编辑)。 */
+export function stepSummary(step: Step): string {
   switch (step.kind) {
-    case "claude":
-      return (
-        <>
-          <textarea
-            placeholder="prompt"
-            value={step.prompt}
-            onChange={(e) => onChange({ ...step, prompt: e.target.value })}
-          />
-          <input
-            placeholder="skill(可选)"
-            value={step.skill ?? ""}
-            onChange={(e) => onChange({ ...step, skill: e.target.value || undefined })}
-          />
-          <label>
-            <input
-              type="checkbox"
-              checked={!!step.allow_writes}
-              onChange={(e) => onChange({ ...step, allow_writes: e.target.checked })}
-            />
-            allow_writes(自主写码,bypassPermissions)
-          </label>
-          <input
-            type="number"
-            placeholder="timeout 秒(可选)"
-            value={step.timeout ?? ""}
-            onChange={(e) => onChange({ ...step, timeout: e.target.value ? Number(e.target.value) : undefined })}
-          />
-        </>
-      );
+    case "claude": {
+      const tags = [step.skill && `@${step.skill}`].filter(Boolean);
+      const head = step.prompt.split("\n")[0].trim();
+      return [head || "(空 prompt)", tags.length ? `· ${tags.join(" ")}` : ""].join(" ");
+    }
     case "codex":
-      return (
-        <>
-          <select
-            value={step.action}
-            onChange={(e) => onChange({ ...step, action: e.target.value as CodexAction })}
-          >
-            <option value="review-mr">review-mr</option>
-            <option value="review-doc">review-doc</option>
-            <option value="ask">ask</option>
-          </select>
-          {step.action === "review-mr" && (
-            <input
-              placeholder="base 分支"
-              value={step.base ?? ""}
-              onChange={(e) => onChange({ ...step, base: e.target.value })}
-            />
-          )}
-          {step.action === "review-doc" && (
-            <input
-              placeholder="文档路径"
-              value={step.path ?? ""}
-              onChange={(e) => onChange({ ...step, path: e.target.value })}
-            />
-          )}
-          {step.action === "ask" && (
-            <input
-              placeholder="问题"
-              value={step.prompt ?? ""}
-              onChange={(e) => onChange({ ...step, prompt: e.target.value })}
-            />
-          )}
-        </>
-      );
+      if (step.action === "review-mr") return `review-mr · base:${step.base || "dev"}`;
+      if (step.action === "review-doc") return `review-doc · ${step.path || "(未指定文档)"}`;
+      return `ask · ${step.prompt || "(空问题)"}`;
     case "human":
-      return (
-        <>
-          <input
-            placeholder="instruction"
-            value={step.instruction}
-            onChange={(e) => onChange({ ...step, instruction: e.target.value })}
-          />
-          <label>
-            <input
-              type="checkbox"
-              checked={step.expects !== undefined}
-              onChange={(e) => onChange({ ...step, expects: e.target.checked ? "artifact" : undefined })}
-            />
-            需要产物
-          </label>
-        </>
-      );
+      return step.instruction || "(空指令)";
     case "loop":
-      return <LoopBody step={step} onChange={onChange} />;
+      return `until:codex-clean · 最多 ${step.max} 轮 · ${step.body.length} 步`;
   }
 }
 
-function LoopBody({
-  step,
-  onChange,
-}: {
-  step: Extract<Step, { kind: "loop" }>;
-  onChange: (s: Step) => void;
-}) {
-  const setBody = (body: Step[]) => onChange({ ...step, body });
-  const setSub = (i: number, s: Step) => setBody(step.body.map((x, j) => (j === i ? s : x)));
-  const add = () =>
-    setBody([...step.body, { id: `${step.id}-body-${step.body.length + 1}`, kind: "codex", action: "review-mr", base: "dev" }]);
-  const del = (i: number) => setBody(step.body.filter((_, j) => j !== i));
-  const move = (i: number, d: -1 | 1) => {
-    const j = i + d;
-    if (j < 0 || j >= step.body.length) return;
-    const next = [...step.body];
-    [next[i], next[j]] = [next[j], next[i]];
-    setBody(next);
-  };
-  return (
-    <div style={{ borderLeft: "2px solid #ccc", paddingLeft: 8, marginTop: 6 }}>
-      <input
-        type="number"
-        placeholder="max 轮数"
-        value={step.max}
-        onChange={(e) => onChange({ ...step, max: Number(e.target.value) || 1 })}
-      />
-      <span> until: codex-clean(固定)</span>
-      {step.body.map((s, i) => (
-        <StepCard
-          key={i}
-          step={s}
-          onChange={(s2) => setSub(i, s2)}
-          onUp={() => move(i, -1)}
-          onDown={() => move(i, 1)}
-          onDelete={() => del(i)}
-        />
-      ))}
-      <button onClick={add}>+ 加循环内步骤</button>
-    </div>
-  );
-}
+const Icon = {
+  pencil: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  ),
+  up: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 19V5M5 12l7-7 7 7" />
+    </svg>
+  ),
+  down: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 5v14M19 12l-7 7-7-7" />
+    </svg>
+  ),
+  trash: (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+    </svg>
+  ),
+};
 
-export function StepCard({
+const badgeClass: Record<StepKind["kind"], string> = {
+  claude: "badge-claude",
+  codex: "badge-codex",
+  human: "badge-human",
+  loop: "badge-loop",
+};
+
+export function StepRow({
   step,
-  onChange,
+  seq,
+  nested,
+  onEdit,
   onUp,
   onDown,
   onDelete,
 }: {
   step: Step;
-  onChange: (s: Step) => void;
+  seq: number;
+  nested?: boolean;
+  onEdit: () => void;
   onUp: () => void;
   onDown: () => void;
   onDelete: () => void;
 }) {
-  const setKind = (kind: StepKind["kind"]) => onChange({ id: step.id, ...defaultsFor(kind) });
   return (
-    <div style={{ border: "1px solid #ddd", borderRadius: 6, padding: 8, margin: "6px 0" }}>
-      <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-        <input
-          placeholder="id"
-          value={step.id}
-          onChange={(e) => onChange({ ...step, id: e.target.value })}
-          style={{ width: 140 }}
-        />
-        <select value={step.kind} onChange={(e) => setKind(e.target.value as StepKind["kind"])}>
-          {KINDS.map((k) => (
-            <option key={k} value={k}>
-              {k}
-            </option>
-          ))}
-        </select>
-        <button onClick={onUp}>↑</button>
-        <button onClick={onDown}>↓</button>
-        <button onClick={onDelete}>删</button>
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
-        <Fields step={step} onChange={onChange} />
+    <div className={`step-row ${nested ? "nested" : ""}`}>
+      <span className="seq">{seq}</span>
+      <span className={`badge ${badgeClass[step.kind]}`}>{step.kind}</span>
+      <span className="step-id">{step.id}</span>
+      <span className="step-summary">{stepSummary(step)}</span>
+      <div className="actions">
+        <button className="btn-icon" title="编辑" onClick={onEdit}>
+          {Icon.pencil}
+        </button>
+        <button className="btn-icon" title="上移" onClick={onUp}>
+          {Icon.up}
+        </button>
+        <button className="btn-icon" title="下移" onClick={onDown}>
+          {Icon.down}
+        </button>
+        <button className="btn-icon btn-danger" title="删除" onClick={onDelete}>
+          {Icon.trash}
+        </button>
       </div>
     </div>
   );

@@ -129,7 +129,7 @@ webview ──▶ ApproveGate(=重试该 step) | SkipStep | Abort
 
 - 顶部:target 目录选择(Tauri dialog 插件)、name 输入、mode 切换(step/auto)。
 - 步骤列表:每个 step 一张卡片 = kind 下拉(claude/codex/human/loop)+ 该 kind 的字段表单;增/删/上移/下移。
-  - claude:prompt(多行)、skill(可选)、allow_writes(开关)、timeout(可选)。
+  - claude:prompt(多行)、skill(可选)。无 allow_writes / timeout 旋钮——claude 一律 bypassPermissions(见设计 11.2)。
   - codex:action 下拉(review-doc/review-mr/ask)+ 条件字段(path / base / prompt)。
   - human:instruction、expects(开关:是否需产物)。
   - loop:until(固定 codex-clean)、max、body(嵌套步骤列表,复用 StepCard)。
@@ -155,7 +155,7 @@ webview ──▶ ApproveGate(=重试该 step) | SkipStep | Abort
 - manifest 校验失败:`save_manifest` / `start_run` 返回字段级错误,UI 红字回显,不进执行。
 - Abort 杀进程经进程组,避免遗留孙辈(Phase 1a spike 教训)。
 - 转发线程与引擎线程在 Run 结束/Abort 后干净退出(event_tx drop → forward 循环结束)。
-- allow_writes step 在 auto 模式 = 完全放权(claude bypassPermissions);UI 在运行前对含 allow_writes 的 auto Run 给一次显式提示(沿用 fail-closed 谨慎基调)。
+- claude step 一律 bypassPermissions(完全放权);auto 模式下含 claude step 的 Run,UI 在运行前给一次显式提示"确认 target 可信"(信任边界前置,沿用 fail-closed 谨慎基调)。
 - webview/Rust 协议形状靠"手写 TS 类型镜像 + 一处契约测试"对齐(见计划),不引入 codegen。
 
 ## 9. 里程碑(详见实施计划)

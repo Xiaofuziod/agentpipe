@@ -36,15 +36,14 @@ STUB_VERDICT=clean \
 
 | kind | 说明 |
 |---|---|
-| claude | 让 Claude 一次性完成一个指令(可引用 skill);allow_writes 开写权限 |
+| claude | 让 Claude 一次性完成一个指令(可引用 skill);一律以 CLI 最高权限(bypassPermissions)跑 |
 | codex | Codex 审文档(review-doc)/ 审仓库改动(review-mr)/ 问一句(ask) |
 | human | 人去做(通常在自己的 Claude Code 会话),引擎等批准与产物 |
 | loop | 包一段子步骤,until: codex-clean 收敛或到 max 上限退出 |
 
 ## 模板
 
-- `templates/full-pipeline.yaml` — 完整 8 步流程
-- `templates/codex-gate-only.yaml` — 仅代码闸门循环(已有改动二次审)
+- `templates/full-pipeline.yaml` — 完整 9 步全自动流程(brainstorm → Claude 审 → Codex 审 → 出执行文档 → 写码建 MR → code-review + simplify → Codex 审 MR 循环到干净 → 存记忆)
 
 ## 设计文档
 

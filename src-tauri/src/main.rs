@@ -9,6 +9,7 @@ fn main() {
         .manage(state::AppState::default())
         .invoke_handler(tauri::generate_handler![
             commands::start_run,
+            commands::start_run_inline,
             commands::send_command,
             commands::save_manifest,
             commands::list_templates,

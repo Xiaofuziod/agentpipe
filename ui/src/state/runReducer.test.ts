@@ -47,6 +47,61 @@ describe("runReducer", () => {
     expect(next).toBe(s);
   });
 
+  it("replays the full-pipeline event stream to a correct terminal console state", () => {
+    // 序列对照 `agentpipe run templates/full-pipeline.yaml`(stub, verdict=clean)实跑事件流:
+    // human 步骤 StepStarted→Gate(Human)→Finished;gated 步骤 Gate(Step)→Started→Finished;
+    // loop 体子步骤逐个门控;最终收敛 Success。
+    const evs: Parameters<typeof runReducer>[1][] = [
+      { type: "RunStarted", name: "full-test" },
+      { type: "StepStarted", step_id: "brainstorm", kind: "human" },
+      { type: "StepAwaitingGate", step_id: "brainstorm", suggestion: "", expects_artifact: true, gate_kind: "human" },
+      { type: "StepFinished", step_id: "brainstorm", status: "Done", summary: "approved" },
+      { type: "StepAwaitingGate", step_id: "design-review-claude", suggestion: "", expects_artifact: false, gate_kind: "step" },
+      { type: "StepStarted", step_id: "design-review-claude", kind: "claude" },
+      { type: "StepFinished", step_id: "design-review-claude", status: "Done", summary: "done" },
+      { type: "StepAwaitingGate", step_id: "design-review-codex", suggestion: "", expects_artifact: false, gate_kind: "step" },
+      { type: "StepStarted", step_id: "design-review-codex", kind: "codex" },
+      { type: "StepFinished", step_id: "design-review-codex", status: "Done", summary: "verdict=Clean" },
+      { type: "StepStarted", step_id: "plan", kind: "human" },
+      { type: "StepAwaitingGate", step_id: "plan", suggestion: "", expects_artifact: true, gate_kind: "human" },
+      { type: "StepFinished", step_id: "plan", status: "Done", summary: "approved" },
+      { type: "StepAwaitingGate", step_id: "implement", suggestion: "", expects_artifact: false, gate_kind: "step" },
+      { type: "StepStarted", step_id: "implement", kind: "claude" },
+      { type: "StepFinished", step_id: "implement", status: "Done", summary: "done" },
+      { type: "StepStarted", step_id: "self-review", kind: "human" },
+      { type: "StepAwaitingGate", step_id: "self-review", suggestion: "", expects_artifact: false, gate_kind: "human" },
+      { type: "StepFinished", step_id: "self-review", status: "Done", summary: "approved" },
+      { type: "LoopIteration", loop_id: "codex-loop", iteration: 1 },
+      { type: "StepAwaitingGate", step_id: "codex-review-mr", suggestion: "", expects_artifact: false, gate_kind: "step" },
+      { type: "StepStarted", step_id: "codex-review-mr", kind: "codex" },
+      { type: "StepFinished", step_id: "codex-review-mr", status: "Done", summary: "verdict=Clean" },
+      { type: "StepAwaitingGate", step_id: "apply-feedback", suggestion: "", expects_artifact: false, gate_kind: "step" },
+      { type: "StepStarted", step_id: "apply-feedback", kind: "claude" },
+      { type: "StepFinished", step_id: "apply-feedback", status: "Done", summary: "done" },
+      { type: "LoopConverged", loop_id: "codex-loop", iterations: 1 },
+      { type: "RunFinished", status: "Success" },
+    ];
+    let s = initialRunState();
+    for (const e of evs) s = runReducer(s, e);
+
+    expect(s.name).toBe("full-test");
+    expect(s.runStatus).toBe("Success");
+    expect(s.activeGate).toBeNull(); // 终态不残留 gate
+    expect(s.loops["codex-loop"].result).toBe("收敛");
+    // 全部 8 个步骤都出现且终态 Done(顺序即出现顺序)
+    expect(s.order).toEqual([
+      "brainstorm",
+      "design-review-claude",
+      "design-review-codex",
+      "plan",
+      "implement",
+      "self-review",
+      "codex-review-mr",
+      "apply-feedback",
+    ]);
+    expect(Object.values(s.steps).every((st) => st.status === "Done")).toBe(true);
+  });
+
   it("caps the log so it cannot grow unbounded", () => {
     let s = initialRunState();
     for (let i = 0; i < 1200; i++) {

@@ -2,7 +2,7 @@ export type RunMode = "step" | "auto";
 export type CodexAction = "review-doc" | "review-mr" | "ask";
 
 export type StepKind =
-  | { kind: "claude"; prompt: string; skill?: string; allow_writes?: boolean; timeout?: number }
+  | { kind: "claude"; prompt: string; skill?: string }
   | { kind: "codex"; action: CodexAction; path?: string; base?: string; prompt?: string }
   | { kind: "human"; instruction: string; expects?: string }
   | { kind: "loop"; until: "codex-clean"; max: number; body: Step[] };

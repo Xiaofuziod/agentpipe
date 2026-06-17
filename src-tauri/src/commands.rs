@@ -16,13 +16,10 @@ fn templates_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates")
 }
 
-#[tauri::command]
-pub fn start_run(app: AppHandle, state: State<AppState>, path: String) -> Result<(), String> {
-    // 读/解析/校验在锁外做,不持 AppState 锁跨阻塞 I/O(避免阻塞 send_command / 清理)
-    let yaml = std::fs::read_to_string(&path).map_err(|e| format!("读取 {path} 失败: {e}"))?;
-    let manifest = Manifest::parse(&yaml).map_err(|e| e.to_string())?;
+/// 校验通过的 manifest → 启动引擎(单 Run 不变式:已有活跃 Run 则拒绝)。
+/// start_run(从文件) 与 start_run_inline(从对象) 共用此尾段。
+fn launch(app: AppHandle, state: &State<AppState>, manifest: Manifest) -> Result<(), String> {
     manifest.validate().map_err(|e| e.to_string())?;
-
     let mut active = state.active.lock().unwrap();
     if active.is_some() {
         return Err("已有运行中的 Run,请先结束".into());
@@ -33,6 +30,20 @@ pub fn start_run(app: AppHandle, state: State<AppState>, path: String) -> Result
         control: started.control,
     });
     Ok(())
+}
+
+#[tauri::command]
+pub fn start_run(app: AppHandle, state: State<AppState>, path: String) -> Result<(), String> {
+    // 读/解析在锁外做,不持 AppState 锁跨阻塞 I/O(避免阻塞 send_command / 清理)
+    let yaml = std::fs::read_to_string(&path).map_err(|e| format!("读取 {path} 失败: {e}"))?;
+    let manifest = Manifest::parse(&yaml).map_err(|e| e.to_string())?;
+    launch(app, &state, manifest)
+}
+
+/// 快捷运行:直接跑一个 manifest 对象,不落临时文件(控制台底部 prompt 栏用)。
+#[tauri::command]
+pub fn start_run_inline(app: AppHandle, state: State<AppState>, manifest: Manifest) -> Result<(), String> {
+    launch(app, &state, manifest)
 }
 
 #[tauri::command]

@@ -17,15 +17,13 @@ impl ClaudeRunner {
         Self { bin }
     }
 
-    /// allow_writes 决定权限姿态(确切 flag 以 Task 1 实测为准,这里给默认形态)。
-    /// timeout_secs 透传到 run_command,防止 claude 挂死拖垮流水线。
-    #[allow(clippy::too_many_arguments)]
+    /// claude step 一律以 CLI 最高权限跑:headless 下唯有 bypassPermissions 能让 claude
+    /// 自主 edit + bash(提交/建 MR 需要),acceptEdits 只放行编辑、挡 bash。
+    /// 见 docs/specs/cli-behavior-findings.md。不暴露超时旋钮,挂死靠控制台 Interrupt 兜底。
     pub fn run(
         &self,
         prompt: &str,
         skill: Option<&str>,
-        allow_writes: bool,
-        timeout_secs: Option<u64>,
         control: Option<&Control>,
         on_line: &mut dyn FnMut(&str),
         cwd: &Path,
@@ -34,15 +32,14 @@ impl ClaudeRunner {
             Some(s) => format!("/{s} {prompt}"),
             None => prompt.to_string(),
         };
-        let mut args = vec!["-p".to_string(), full_prompt];
-        if allow_writes {
-            // 实测:bypassPermissions 才能让 headless claude 自主 edit + bash(提交需要),
-            // acceptEdits 只放行编辑、挡 bash。见 docs/specs/cli-behavior-findings.md。
-            args.push("--permission-mode".into());
-            args.push("bypassPermissions".into());
-        }
+        let args = vec![
+            "--permission-mode".to_string(),
+            "bypassPermissions".to_string(),
+            "-p".to_string(),
+            full_prompt,
+        ];
         let (stdout, success) =
-            run_command(&self.bin, &args, cwd, None, timeout_secs, control, on_line)?;
+            run_command(&self.bin, &args, cwd, None, None, control, on_line)?;
         if !success {
             return Err(EngineError::Cli("claude 非零退出".into()));
         }

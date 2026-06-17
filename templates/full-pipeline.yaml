@@ -1,12 +1,12 @@
 version: 1
 name: "<任务名>"
 target: <目标仓库绝对路径>
-mode: step
+mode: auto
 steps:
   - id: brainstorm
-    kind: human
-    instruction: "在 Claude Code 跑 brainstorming,产出设计 spec"
-    expects: artifact
+    kind: claude
+    skill: brainstorming
+    prompt: "对这个任务做 brainstorming 产出设计方案,所有设计决策默认采用你的推荐选项无需等我确认,把方案写成设计文档落到 docs/specs/,最后只输出该文档路径"
   - id: design-review-claude
     kind: claude
     skill: four-dimension-review
@@ -16,16 +16,15 @@ steps:
     action: review-doc
     path: "{{brainstorm.artifact}}"
   - id: plan
-    kind: human
-    instruction: "在 Claude Code 跑 writing-plans"
-    expects: artifact
+    kind: claude
+    skill: writing-plans
+    prompt: "依据设计文档 {{brainstorm.artifact}} 产出执行文档(分步实施计划),落到 docs/plans/,最后只输出该文档路径"
   - id: implement
     kind: claude
-    allow_writes: true
-    prompt: "按 {{plan.artifact}} 实现,提交,建 MR,最后只输出 MR URL"
+    prompt: "按执行文档 {{plan.artifact}} 实现,提交代码,创建 MR,最后只输出 MR URL"
   - id: self-review
-    kind: human
-    instruction: "code-review + simplify,提交到 MR"
+    kind: claude
+    prompt: "对刚才的改动先跑 /code-review 修复发现的问题,再跑 /simplify 优化,然后提交到 MR"
   - id: codex-loop
     kind: loop
     until: codex-clean
@@ -37,5 +36,7 @@ steps:
         base: dev
       - id: apply-feedback
         kind: claude
-        allow_writes: true
         prompt: "按 Codex 反馈修改并提交:{{codex-review-mr.findings}}"
+  - id: memorize
+    kind: claude
+    prompt: "总结本轮任务需要被记录的点(踩坑/约定/关键设计决策),按记忆规范存入记忆并更新记忆索引"

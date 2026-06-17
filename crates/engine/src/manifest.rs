@@ -34,10 +34,6 @@ pub enum StepKind {
         prompt: String,
         #[serde(default)]
         skill: Option<String>,
-        #[serde(default)]
-        allow_writes: bool,
-        #[serde(default)]
-        timeout: Option<u64>,
     },
     Codex {
         action: CodexAction,

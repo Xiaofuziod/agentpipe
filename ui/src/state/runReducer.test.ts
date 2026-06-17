@@ -40,6 +40,52 @@ describe("runReducer", () => {
     expect(s.log.some((l) => l.includes("hello"))).toBe(true);
   });
 
+  it("stamps startedAt on StepStarted and tracks lastLine on StepProgress", () => {
+    let s = initialRunState();
+    s = runReducer(s, { type: "StepStarted", step_id: "impl", kind: "claude" });
+    expect(typeof s.steps.impl.startedAt).toBe("number");
+    s = runReducer(s, { type: "StepProgress", step_id: "impl", line: "第 2 轮 · 调用 Bash" });
+    expect(s.steps.impl.lastLine).toBe("第 2 轮 · 调用 Bash");
+    expect(s.steps.impl.status).toBe("Running"); // 进度行不改状态
+  });
+
+  it("tracks round from StepProgress and metrics from StepFinished", () => {
+    let s = initialRunState();
+    s = runReducer(s, { type: "StepStarted", step_id: "impl", kind: "claude" });
+    s = runReducer(s, { type: "StepProgress", step_id: "impl", line: "调用 Bash", round: 2 });
+    expect(s.steps.impl.round).toBe(2);
+    s = runReducer(s, {
+      type: "StepFinished",
+      step_id: "impl",
+      status: "Done",
+      summary: "done",
+      metrics: { num_turns: 3, duration_ms: 3266, cost_usd: 0.49 },
+    });
+    expect(s.steps.impl.metrics).toEqual({ num_turns: 3, duration_ms: 3266, cost_usd: 0.49 });
+  });
+
+  it("clears a lingering gate when progress resumes (gate-approved retry)", () => {
+    let s = initialRunState();
+    s = runReducer(s, {
+      type: "StepAwaitingGate",
+      step_id: "impl",
+      suggestion: "校验未通过,重试?",
+      expects_artifact: false,
+      gate_kind: "decision",
+    });
+    expect(s.activeGate).not.toBeNull();
+    // 批准后引擎重跑(不发 StepStarted),首个进度行应清掉残留的 gate
+    s = runReducer(s, { type: "StepProgress", step_id: "impl", line: "重试中" });
+    expect(s.activeGate).toBeNull();
+  });
+
+  it("leaves round unset when StepProgress carries no round (codex path)", () => {
+    let s = initialRunState();
+    s = runReducer(s, { type: "StepProgress", step_id: "rev", line: "codex 输出" });
+    expect(s.steps.rev.round).toBeUndefined();
+    expect(s.steps.rev.lastLine).toBe("codex 输出");
+  });
+
   it("returns prev state (never undefined) for an unknown event type", () => {
     const s = initialRunState();
     // 模拟版本错配:引擎发来 UI 类型里没有的事件

@@ -1,7 +1,7 @@
 use agentpipe_engine::control::Control;
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
-use agentpipe_engine::protocol::{Command, Event, RunStatus};
+use agentpipe_engine::protocol::{Command, Event, RunStatus, StepStatus};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -150,6 +150,189 @@ steps:
     assert!(events
         .iter()
         .any(|e| matches!(e, Event::LoopMaxReached { max: 2, .. })));
+}
+
+/// 跑一个带 verify 的单 claude step,返回收到的事件流。
+fn run_verify_step(verdict: &str, verify_yaml: &str) -> Vec<Event> {
+    std::env::set_var("STUB_VERDICT", verdict);
+    let yaml = format!(
+        r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: impl
+    kind: claude
+    prompt: 实现功能
+    verify:
+{verify_yaml}
+"#
+    );
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_c, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    ex.run();
+    erx.try_iter().collect()
+}
+
+fn count_progress(events: &[Event], needle: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, Event::StepProgress { line, .. } if line.contains(needle)))
+        .count()
+}
+
+#[test]
+fn verify_clean_passes_without_retry() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let events = run_verify_step("clean", "      by: codex\n      action: review-mr\n      base: dev");
+    assert_eq!(count_progress(&events, "校验未通过"), 0);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::StepFinished { summary, .. } if summary.contains("已校验")
+    )));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::RunFinished { status: RunStatus::Success })));
+}
+
+#[test]
+fn verify_unmet_retries_to_max_then_fails() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let events = run_verify_step(
+        "changes_requested",
+        "      by: codex\n      action: review-mr\n      base: dev\n      max_retries: 2\n      on_unmet: fail",
+    );
+    // 重试 2 次 → 2 条"校验未通过"
+    assert_eq!(count_progress(&events, "校验未通过"), 2);
+    assert!(events.iter().any(|e| matches!(e, Event::StepFailed { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::RunFinished { status: RunStatus::Failed })));
+}
+
+#[test]
+fn verify_unmet_continue_proceeds() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let events = run_verify_step(
+        "changes_requested",
+        "      by: codex\n      action: review-mr\n      base: dev\n      max_retries: 1\n      on_unmet: continue",
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::StepFinished { summary, .. } if summary.contains("未达标")
+    )));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::RunFinished { status: RunStatus::Success })));
+}
+
+#[test]
+fn verify_unmet_gate_then_skip() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("STUB_VERDICT", "changes_requested");
+    // max_retries:0 → 首次未达成直接走 gate;预置 SkipStep 指令
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: impl
+    kind: claude
+    prompt: 实现功能
+    verify:
+      by: codex
+      action: review-mr
+      base: dev
+      max_retries: 0
+      on_unmet: gate
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx_tx, crx) = mpsc::channel();
+    ctx_tx.send(Command::SkipStep { step_id: "impl".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    ex.run();
+    let events: Vec<_> = erx.try_iter().collect();
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::StepAwaitingGate { gate_kind, .. } if matches!(gate_kind, agentpipe_engine::protocol::GateKind::Decision)
+    )));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::StepFinished { status: StepStatus::Skipped, .. }
+    )));
+}
+
+#[test]
+fn verify_by_claude_pass_proceeds() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // claude verifier 回复 VERDICT: pass → 达成(stub 把换行压成空格,故 result 直接是判定行;
+    // 真 claude 的多行末行场景由 executor::tests::parse_verdict_* 单测覆盖)
+    std::env::set_var("STUB_CLAUDE_RESULT", "VERDICT: pass");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: impl
+    kind: claude
+    prompt: 实现功能
+    verify:
+      by: claude
+      prompt: 判定目标是否达成
+      on_unmet: fail
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_c, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    ex.run();
+    let events: Vec<_> = erx.try_iter().collect();
+    std::env::remove_var("STUB_CLAUDE_RESULT");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::StepFinished { summary, .. } if summary.contains("已校验")
+    )));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::RunFinished { status: RunStatus::Success })));
+}
+
+#[test]
+fn verify_by_claude_fail_then_fails() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("STUB_CLAUDE_RESULT", "VERDICT: fail");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: impl
+    kind: claude
+    prompt: 实现功能
+    verify:
+      by: claude
+      prompt: 判定目标是否达成
+      max_retries: 1
+      on_unmet: fail
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_c, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    ex.run();
+    let events: Vec<_> = erx.try_iter().collect();
+    std::env::remove_var("STUB_CLAUDE_RESULT");
+    assert_eq!(count_progress(&events, "校验未通过"), 1); // max_retries=1
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::RunFinished { status: RunStatus::Failed })));
 }
 
 #[test]

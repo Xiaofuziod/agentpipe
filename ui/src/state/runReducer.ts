@@ -1,9 +1,13 @@
-import type { EngineEvent, StepStatus, RunStatus, GateKind } from "../types";
+import type { EngineEvent, StepStatus, RunStatus, GateKind, StepMetrics } from "../types";
 
 export interface StepView {
   status: StepStatus;
   summary?: string;
   error?: string;
+  startedAt?: number; // 进入 Running 的 UI 时刻(实时秒表用)
+  lastLine?: string; // 最近一条进度行(运行中展示)
+  round?: number; // 当前模型请求轮次(claude stream-json)
+  metrics?: StepMetrics; // 终态度量(轮次/耗时/成本)
 }
 export interface GateView {
   step_id: string;
@@ -51,10 +55,14 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
   switch (e.type) {
     case "RunStarted":
       return { ...prev, name: e.name, log: pushLog(prev.log, `▶ ${e.name}`) };
-    case "StepProgress":
-      return { ...prev, log: pushLog(prev.log, `  ${e.line}`) };
+    case "StepProgress": {
+      const patch: Partial<StepView> = { lastLine: e.line };
+      if (e.round != null) patch.round = e.round;
+      // 有进度行 = 引擎已恢复执行,清掉可能残留的 gate(决策门批准后重试不发 StepStarted)
+      return { ...prev, ...setStep(prev, e.step_id, patch), activeGate: null, log: pushLog(prev.log, `  ${e.line}`) };
+    }
     case "StepStarted":
-      return { ...prev, ...setStep(prev, e.step_id, { status: "Running" }), activeGate: null };
+      return { ...prev, ...setStep(prev, e.step_id, { status: "Running", startedAt: Date.now() }), activeGate: null };
     case "StepAwaitingGate":
       return {
         ...prev,
@@ -67,7 +75,11 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
         },
       };
     case "StepFinished":
-      return { ...prev, ...setStep(prev, e.step_id, { status: e.status, summary: e.summary }), activeGate: null };
+      return {
+        ...prev,
+        ...setStep(prev, e.step_id, { status: e.status, summary: e.summary, metrics: e.metrics ?? undefined }),
+        activeGate: null,
+      };
     case "StepFailed":
       return { ...prev, ...setStep(prev, e.step_id, { status: "Failed", error: e.error }) };
     case "LoopIteration":

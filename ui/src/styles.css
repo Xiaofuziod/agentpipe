@@ -204,14 +204,27 @@ body {
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.3px;
+  flex-shrink: 0; /* 标题不被长 count 挤压 */
 }
 .pane-header .ph-count {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--text-faint);
+  /* 长 run 名单行截断,不在 44px 头部里换行挤压右侧操作区 */
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .pane-header .ph-spacer {
   flex: 1;
+  min-width: var(--sp-sm); /* 始终给操作区留一点呼吸位 */
+}
+/* 头部右侧操作(按钮 / run 结果)不被压缩 */
+.pane-header .btn,
+.pane-header .run-result {
+  flex-shrink: 0;
 }
 .pane-body {
   padding: var(--sp-lg);
@@ -838,6 +851,32 @@ body {
 }
 .console-line.st-Running .cid {
   color: var(--accent);
+}
+/* 进度/摘要正文:占满剩余宽度,单行截断,不把秒表挤出行外 */
+.console-line .cline-main {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+/* 运行中 step 的实时秒表 */
+.console-line .cline-timer {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums; /* 数字等宽,秒表跳动不抖 */
+}
+/* 当前模型请求轮次徽章(运行中) */
+.console-line .cline-round {
+  flex-shrink: 0;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+/* 终态度量(轮次 · 耗时 · 成本) */
+.console-line .cline-metrics {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
 
 .loop-tick {

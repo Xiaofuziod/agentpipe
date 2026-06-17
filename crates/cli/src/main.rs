@@ -54,13 +54,24 @@ fn main() {
                 step_id,
                 status,
                 summary,
+                metrics,
             } => {
                 let mark = if matches!(status, StepStatus::Skipped) {
                     "⏭"
                 } else {
                     "✓"
                 };
-                println!("  {mark} {step_id}: {summary}");
+                let m = metrics
+                    .map(|m| {
+                        format!(
+                            " · {} 轮 · {:.1}s · ${:.2}",
+                            m.num_turns,
+                            m.duration_ms as f64 / 1000.0,
+                            m.cost_usd
+                        )
+                    })
+                    .unwrap_or_default();
+                println!("  {mark} {step_id}: {summary}{m}");
             }
             Event::StepFailed { step_id, error } => println!("  ✗ {step_id}: {error}"),
             Event::LoopIteration {

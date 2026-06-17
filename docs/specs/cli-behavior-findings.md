@@ -40,6 +40,13 @@ runner 内嵌的 `REVIEW_SCHEMA` 已改严格版。
 
 bypassPermissions 跳过所有审批,claude 在 target 仓库里完全自主。AgentPipe 已有两道约束:cwd 严格取自 manifest.target(不回退 home)、step 模式下 allow_writes 步骤(含 loop body)逐步门控。真机用 auto 模式跑 allow_writes 步骤等于完全放权,需用户自行确认 target 可信。
 
+## 2b. Claude 只读校验(verify gate,2026-06-17 实测)
+
+- `claude -p "<判定指令>" --permission-mode plan --output-format stream-json --verbose`:claude **只读**探查(实测会用只读 Bash `ls`/`cat`)、**不创建或修改任何文件**,正常产出 `assistant`/`result` 帧,最终 `result.result` 含约定的 `VERDICT: pass` 末行。
+- 故 claude-as-verifier 用 `--permission-mode plan` 作只读机制(干活步骤仍 `bypassPermissions`),fail-closed 安全:verifier 不应改动 target。runner `ClaudeRunner::run` 的 `read_only` 参数即切这两个 permission-mode。
+- 解析:`executor::parse_verdict` 末行优先扫 `VERDICT:`,`pass` → Clean,其余/缺失 fail-closed → ChangesRequested。
+- 注:本机 `claude` 是 stock Claude Code(非 定制 fork),plan 模式行为正常;定制 fork 禁用了 EnterPlanMode,不适用于此。
+
 ## 3. 待验(未烧 quota 的项)
 
 - `claude -p "/skill-name …"` 能否可靠触发 skill:runner 当前用 `/{skill} {prompt}` 前缀,合理但未实测。design-review-claude(skill: four-dimension-review)首次真机跑时确认;若不触发,改为在 prompt 里点名调用。

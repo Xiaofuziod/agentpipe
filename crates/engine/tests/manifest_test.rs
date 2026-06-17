@@ -1,4 +1,4 @@
-use agentpipe_engine::manifest::{CodexAction, Manifest, RunMode, StepKind};
+use agentpipe_engine::manifest::{CodexAction, Manifest, OnUnmet, RunMode, StepKind, Verifier};
 
 #[test]
 fn parses_sample_manifest() {
@@ -86,6 +86,147 @@ steps:
     let m = Manifest::parse(yaml).unwrap();
     let err = m.validate().unwrap_err();
     assert!(err.to_string().contains("codex step"));
+}
+
+#[test]
+fn parses_claude_step_with_verify() {
+    let yaml = r#"
+version: 1
+name: v
+target: /tmp
+steps:
+  - id: impl
+    kind: claude
+    prompt: 实现
+    verify:
+      by: codex
+      action: review-mr
+      base: dev
+      max_retries: 3
+      on_unmet: fail
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    m.validate().expect("valid");
+    match &m.steps[0].kind {
+        StepKind::Claude { verify: Some(v), .. } => {
+            assert_eq!(v.by, Verifier::Codex);
+            assert_eq!(v.action, Some(CodexAction::ReviewMr));
+            assert_eq!(v.base.as_deref(), Some("dev"));
+            assert_eq!(v.max_retries, 3);
+            assert_eq!(v.on_unmet, OnUnmet::Fail);
+            assert!(v.feedback); // 默认 true
+        }
+        other => panic!("expected claude+verify, got {other:?}"),
+    }
+}
+
+#[test]
+fn verify_defaults_max_retries_and_gate() {
+    let yaml = r#"
+version: 1
+name: v
+target: /tmp
+steps:
+  - id: impl
+    kind: claude
+    prompt: 实现
+    verify:
+      by: codex
+      action: review-mr
+      base: dev
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    match &m.steps[0].kind {
+        StepKind::Claude { verify: Some(v), .. } => {
+            assert_eq!(v.max_retries, 2); // 默认
+            assert_eq!(v.on_unmet, OnUnmet::Gate); // 默认最保守
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn validate_verify_review_mr_requires_base() {
+    let yaml = r#"
+version: 1
+name: bad
+target: /tmp
+steps:
+  - id: impl
+    kind: claude
+    prompt: 实现
+    verify:
+      by: codex
+      action: review-mr
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let err = m.validate().unwrap_err();
+    assert!(err.to_string().contains("verify") && err.to_string().contains("base"));
+}
+
+#[test]
+fn parses_claude_verifier() {
+    let yaml = r#"
+version: 1
+name: v
+target: /tmp
+steps:
+  - id: impl
+    kind: claude
+    prompt: 实现
+    verify:
+      by: claude
+      prompt: 判定目标是否达成
+      skill: four-dimension-review
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    m.validate().expect("valid");
+    match &m.steps[0].kind {
+        StepKind::Claude { verify: Some(v), .. } => {
+            assert_eq!(v.by, Verifier::Claude);
+            assert_eq!(v.prompt.as_deref(), Some("判定目标是否达成"));
+            assert_eq!(v.skill.as_deref(), Some("four-dimension-review"));
+        }
+        other => panic!("expected claude verifier, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_claude_verifier_requires_prompt() {
+    let yaml = r#"
+version: 1
+name: bad
+target: /tmp
+steps:
+  - id: impl
+    kind: claude
+    prompt: 实现
+    verify:
+      by: claude
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let err = m.validate().unwrap_err().to_string();
+    assert!(err.contains("claude") && err.contains("prompt"));
+}
+
+#[test]
+fn validate_verify_max_retries_capped() {
+    let yaml = r#"
+version: 1
+name: bad
+target: /tmp
+steps:
+  - id: impl
+    kind: claude
+    prompt: 实现
+    verify:
+      by: codex
+      action: review-mr
+      base: dev
+      max_retries: 99
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    assert!(m.validate().unwrap_err().to_string().contains("max_retries"));
 }
 
 #[test]

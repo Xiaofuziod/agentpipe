@@ -56,6 +56,12 @@ pub fn run_command(
 
     if let Some(c) = control {
         c.set_current(Some(child.id()));
+        // 关竞态:若 request_abort 在 spawn 与 set_current 之间到达,那次 kill_current 扑空
+        // (current 还是 None)。此处 set_current 后补查一次,把刚 spawn 的进程即时杀掉,
+        // 否则要等它自然结束才停(中止延迟一个子进程时长)。
+        if c.is_aborted() {
+            c.kill_current();
+        }
     }
 
     if let Some(s) = stdin {

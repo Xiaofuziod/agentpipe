@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ipc } from "../ipc";
 import type { StepStatus } from "../types";
 import type { RunRecord } from "../state/useRuns";
@@ -12,6 +12,30 @@ const MARK: Record<StepStatus, string> = {
   Failed: "✗",
   Skipped: "⏭",
 };
+
+/** 活跃时每秒返回当前时刻,用于驱动运行中 step 的实时秒表;非活跃不 tick(省渲染)。 */
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [active]);
+  return now;
+}
+
+function fmtElapsed(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  const ss = String(s % 60).padStart(2, "0");
+  return `${Math.floor(s / 60)}:${ss}`;
+}
+
+function fmtMetrics(m: { num_turns: number; duration_ms: number; cost_usd: number }): string {
+  const secs = (m.duration_ms / 1000).toFixed(1);
+  const cost = m.cost_usd > 0 ? ` · $${m.cost_usd.toFixed(2)}` : "";
+  return `${m.num_turns} 轮 · ${secs}s${cost}`;
+}
 
 export function Console({
   record,
@@ -30,12 +54,13 @@ export function Console({
 }) {
   const state = record?.state ?? null;
   const live = isLive && !!state && !state.runStatus;
+  const now = useNow(live);
 
   return (
     <>
       <div className="pane-header">
         <span className="ph-title">控制台</span>
-        {record && <span className="ph-count">{record.name}</span>}
+        {record && <span className="ph-count" title={record.name}>{record.name}</span>}
         <div className="ph-spacer" />
         {live && (
           <button className="btn btn-danger btn-sm" onClick={() => ipc.sendCommand({ type: "Abort" })}>
@@ -55,11 +80,19 @@ export function Console({
             <div className="console-feed">
               {state.order.map((id) => {
                 const st = state.steps[id];
+                const running = st.status === "Running";
+                // 运行中:显示最近进度行(尚无 summary);终态:显示 summary/error
+                const main = running ? st.lastLine ?? "" : st.summary ?? st.error ?? "";
                 return (
                   <div key={id} className={`console-line st-${st.status}`}>
                     <span className="mark">{MARK[st.status]}</span>
                     <span className="cid">{id}</span>
-                    <span>{st.summary ?? st.error ?? ""}</span>
+                    {running && st.round != null && <span className="cline-round">第 {st.round} 轮</span>}
+                    <span className="cline-main">{main}</span>
+                    {st.metrics && <span className="cline-metrics">{fmtMetrics(st.metrics)}</span>}
+                    {running && st.startedAt != null && (
+                      <span className="cline-timer">{fmtElapsed(now - st.startedAt)}</span>
+                    )}
                   </div>
                 );
               })}

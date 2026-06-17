@@ -34,6 +34,9 @@ pub enum StepKind {
         prompt: String,
         #[serde(default)]
         skill: Option<String>,
+        /// 可选校验门:步骤跑完后判目标是否达成,未达成带反馈重试。见 verify-gate spec。
+        #[serde(default)]
+        verify: Option<Verify>,
     },
     Codex {
         action: CodexAction,
@@ -64,6 +67,61 @@ pub enum CodexAction {
     Ask,
 }
 
+/// 校验门:由 codex 或 claude 判"目标达成"。见 verify-gate spec。
+#[derive(Debug, Deserialize, Serialize)]
+pub struct Verify {
+    pub by: Verifier,
+    /// codex verifier:判据形态(review-mr / review-doc / ask)。claude verifier 忽略。
+    #[serde(default)]
+    pub action: Option<CodexAction>,
+    #[serde(default)]
+    pub base: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    /// codex(ask 指令)或 claude(判定指令)的 prompt。
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// claude verifier 的 skill(可选)。
+    #[serde(default)]
+    pub skill: Option<String>,
+    /// 未达成时重跑干活步骤的次数上限(0 = 纯质量门,不重试)。
+    #[serde(default = "default_max_retries")]
+    pub max_retries: u32,
+    #[serde(default)]
+    pub on_unmet: OnUnmet,
+    /// 重试时把 verifier findings 作为反馈注入干活 prompt。
+    #[serde(default = "default_true")]
+    pub feedback: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Verifier {
+    Codex,
+    /// claude 只读判定(`--permission-mode plan`),回复末行 `VERDICT: pass|fail`。
+    Claude,
+}
+
+/// 重试耗尽后的升级策略。默认 gate:最保守,交人决策。
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum OnUnmet {
+    #[default]
+    Gate,
+    Fail,
+    Continue,
+}
+
+fn default_max_retries() -> u32 {
+    2
+}
+fn default_true() -> bool {
+    true
+}
+
+/// verify.max_retries 的硬上限,防 runaway(每次重试都烧一个 claude + 一个 codex)。
+const MAX_VERIFY_RETRIES: u32 = 10;
+
 impl Manifest {
     pub fn parse(yaml: &str) -> Result<Self, EngineError> {
         serde_yml::from_str(yaml).map_err(|e| EngineError::Parse(e.to_string()))
@@ -76,28 +134,67 @@ impl Manifest {
         Ok(())
     }
 
+    /// codex 判据三个 action 的必填字段校验(codex step 与 verify 门复用)。
+    fn validate_codex_fields(
+        step_id: &str,
+        ctx: &str,
+        action: &CodexAction,
+        path: &Option<String>,
+        base: &Option<String>,
+        prompt: &Option<String>,
+    ) -> Result<(), EngineError> {
+        let missing = match action {
+            CodexAction::ReviewDoc if path.is_none() => Some(("review-doc", "path")),
+            CodexAction::ReviewMr if base.is_none() => Some(("review-mr", "base")),
+            CodexAction::Ask if prompt.is_none() => Some(("ask", "prompt")),
+            _ => None,
+        };
+        match missing {
+            Some((act, field)) => Err(EngineError::Validation(format!(
+                "step '{step_id}': {ctx} {act} 需要 {field} 字段"
+            ))),
+            None => Ok(()),
+        }
+    }
+
     fn validate_step(step: &Step) -> Result<(), EngineError> {
         match &step.kind {
+            StepKind::Claude { verify, .. } => {
+                if let Some(v) = verify {
+                    match v.by {
+                        Verifier::Codex => {
+                            let action = v.action.as_ref().ok_or_else(|| {
+                                EngineError::Validation(format!(
+                                    "step '{}': verify by codex 需要 action 字段",
+                                    step.id
+                                ))
+                            })?;
+                            Self::validate_codex_fields(&step.id, "verify codex", action, &v.path, &v.base, &v.prompt)?;
+                        }
+                        Verifier::Claude => {
+                            if v.prompt.is_none() {
+                                return Err(EngineError::Validation(format!(
+                                    "step '{}': verify by claude 需要 prompt 字段(判定指令)",
+                                    step.id
+                                )));
+                            }
+                        }
+                    }
+                    if v.max_retries > MAX_VERIFY_RETRIES {
+                        return Err(EngineError::Validation(format!(
+                            "step '{}': verify.max_retries 不能超过 {MAX_VERIFY_RETRIES}",
+                            step.id
+                        )));
+                    }
+                }
+                Ok(())
+            }
             StepKind::Codex {
                 action,
                 path,
                 base,
                 prompt,
-            } => match action {
-                CodexAction::ReviewDoc if path.is_none() => Err(EngineError::Validation(format!(
-                    "step '{}': codex review-doc 需要 path 字段",
-                    step.id
-                ))),
-                CodexAction::ReviewMr if base.is_none() => Err(EngineError::Validation(format!(
-                    "step '{}': codex review-mr 需要 base 字段",
-                    step.id
-                ))),
-                CodexAction::Ask if prompt.is_none() => Err(EngineError::Validation(format!(
-                    "step '{}': codex ask 需要 prompt 字段",
-                    step.id
-                ))),
-                _ => Ok(()),
-            },
+            } => Self::validate_codex_fields(&step.id, "codex", action, path, base, prompt),
             StepKind::Loop { body, until, .. } => {
                 if until != "codex-clean" {
                     return Err(EngineError::Validation(format!(

@@ -47,7 +47,7 @@ impl CodexRunner {
         base: Option<&str>,
         ask_prompt: Option<&str>,
         control: Option<&Control>,
-        on_line: &mut dyn FnMut(&str),
+        on_progress: &mut dyn FnMut(&str, Option<u32>),
         cwd: &Path,
     ) -> Result<ReviewResult, EngineError> {
         let seq = OUT_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -108,7 +108,9 @@ impl CodexRunner {
             ),
         };
 
-        run_command(&self.bin, &args, cwd, stdin.as_deref(), None, control, on_line)?;
+        // codex exec 输出非 NDJSON 协议,原始行直接作无轮次进度上报(round=None)。
+        let mut raw_sink = |line: &str| on_progress(line, None);
+        run_command(&self.bin, &args, cwd, stdin.as_deref(), None, control, &mut raw_sink)?;
         Ok(parse_review(&out_file))
     }
 }

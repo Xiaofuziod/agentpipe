@@ -1,7 +1,7 @@
 use agentpipe_engine::control::Control;
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
-use agentpipe_engine::protocol::{Command, Event};
+use agentpipe_engine::protocol::{Command, Event, RunStatus};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
@@ -24,10 +24,24 @@ pub fn start(app: AppHandle, manifest: Manifest, bins: RunnerBins) -> Started {
     // 转发线程:引擎事件 → webview
     let forward_app = app.clone();
     thread::spawn(move || {
+        let mut saw_finished = false;
         for evt in event_rx {
+            if matches!(evt, Event::RunFinished { .. }) {
+                saw_finished = true;
+            }
             let _ = forward_app.emit(EVENT_CHANNEL, evt);
         }
-        // event_rx 关闭 = 引擎线程结束(正常 RunFinished 后返回,或 panic)。
+        // event_rx 关闭 = 引擎线程结束。正常路径 executor 已 emit RunFinished;
+        // 若没见过(引擎 panic 在 emit 前),合成一个终态,否则 webview 的 activeId/live/busy
+        // 永不复位 → UI 永久卡死("等待引擎事件"、prompt 禁用)。
+        if !saw_finished {
+            let _ = forward_app.emit(
+                EVENT_CHANNEL,
+                Event::RunFinished {
+                    status: RunStatus::Failed,
+                },
+            );
+        }
         // 一律清空 active —— 不能只在 RunFinished 上清,否则引擎 panic 时会永久卡住单 Run 不变式。
         if let Some(st) = forward_app.try_state::<crate::state::AppState>() {
             *st.active.lock().unwrap() = None;

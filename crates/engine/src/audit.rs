@@ -40,10 +40,64 @@ pub fn is_valid_run_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+use crate::protocol::Event;
+use std::fs::{self, File};
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+
+/// 一行审计:{"ts": <rfc3339 millis>, "event": <Event>}。落盘与 --json stdout 共用。
+pub fn event_json_line(event: &Event) -> String {
+    serde_json::json!({
+        "ts": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        "event": event,
+    })
+    .to_string()
+}
+
+/// 把一次 run 的事件追加进 ~/.agentpipe/runs/<run-id>.ndjson。
+/// 审计是旁路:record 内部 I/O 错误只告警,不冒泡。
+pub struct RunRecorder {
+    writer: BufWriter<File>,
+    run_id: String,
+    path: PathBuf,
+}
+
+impl RunRecorder {
+    /// RunStarted 时创建;run_dir 不存在则建。失败 → 调用方降级为不落盘。
+    pub fn open(run_dir: &Path, name: &str) -> std::io::Result<Self> {
+        fs::create_dir_all(run_dir)?;
+        let id = run_id(name, Utc::now());
+        let path = run_dir.join(format!("{id}.ndjson"));
+        let file = File::create(&path)?;
+        Ok(Self { writer: BufWriter::new(file), run_id: id, path })
+    }
+
+    /// 追加一行并立即 flush(BufWriter 默认缓冲会在崩溃时丢尾 —— 那几行恰是排错最需要的)。
+    pub fn record(&mut self, event: &Event) {
+        let line = event_json_line(event);
+        if let Err(e) = writeln!(self.writer, "{line}").and_then(|_| self.writer.flush()) {
+            eprintln!("(审计写入失败,已忽略: {e})");
+        }
+    }
+
+    pub fn run_id(&self) -> &str {
+        &self.run_id
+    }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
+    use crate::protocol::{Event, RunStatus};
+    use std::path::PathBuf;
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("agentpipe-test-{}-{tag}", std::process::id()))
+    }
 
     #[test]
     fn run_id_combines_timestamp_and_slug() {
@@ -75,5 +129,31 @@ mod tests {
         assert!(!id.contains("--"), "不应有连续破折号: {id}");
         assert!(!id.ends_with('-'), "不应以破折号结尾: {id}");
         assert!(is_valid_run_id(&id), "应是合法 run-id: {id}");
+    }
+
+    #[test]
+    fn recorder_writes_ndjson_lines() {
+        let dir = unique_dir("rec");
+        let mut r = RunRecorder::open(&dir, "demo run").unwrap();
+        r.record(&Event::RunStarted { name: "demo run".into() });
+        r.record(&Event::RunFinished { status: RunStatus::Success });
+        let path = r.path().to_path_buf();
+        drop(r);
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert!(first.get("ts").is_some());
+        assert_eq!(first["event"]["type"], "RunStarted");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn event_json_line_has_ts_and_event() {
+        let line = event_json_line(&Event::StepFailed { step_id: "x".into(), error: "boom".into() });
+        let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(v["event"]["type"], "StepFailed");
+        assert_eq!(v["event"]["error"], "boom");
     }
 }

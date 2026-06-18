@@ -125,16 +125,21 @@ impl Executor {
             }
         }
 
+        // Loop 自身不发 StepStarted —— 它没有对应的 StepFinished,宿主按 step_id 去重渲染时
+        // 会把它显示成永久 "运行中" 的幽灵步骤(GUI 控制台见过)。loop 生命周期由
+        // LoopIteration / LoopConverged / LoopMaxReached 表达,body 子步骤各自发 Started/Finished。
         let kind_name = match &step.kind {
-            StepKind::Claude { .. } => "claude",
-            StepKind::Codex { .. } => "codex",
-            StepKind::Human { .. } => "human",
-            StepKind::Loop { .. } => "loop",
+            StepKind::Claude { .. } => Some("claude"),
+            StepKind::Codex { .. } => Some("codex"),
+            StepKind::Human { .. } => Some("human"),
+            StepKind::Loop { .. } => None,
         };
-        let _ = self.events.send(Event::StepStarted {
-            step_id: step.id.clone(),
-            kind: kind_name.into(),
-        });
+        if let Some(kind) = kind_name {
+            let _ = self.events.send(Event::StepStarted {
+                step_id: step.id.clone(),
+                kind: kind.into(),
+            });
+        }
 
         match &step.kind {
             StepKind::Codex { action, path, base, prompt } => {

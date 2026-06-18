@@ -5,7 +5,7 @@ import { StepRow } from "./StepCard";
 import { StepDrawer } from "./StepDrawer";
 
 const emptyStep = (id: string): Step => ({ id, kind: "claude", prompt: "" });
-const emptyManifest = (): Manifest => ({ version: 1, name: "", target: "", mode: "step", steps: [] });
+const emptyManifest = (): Manifest => ({ version: 1, name: "", target: "", mode: "step", worktree: false, steps: [] });
 
 export function Composer({
   target,
@@ -111,6 +111,14 @@ export function Composer({
             </select>
           </div>
         </div>
+        <label className="checkbox" style={{ marginTop: 12 }} title="在 target 仓库的一个新 git worktree(新分支)里跑,不改动当前工作区;跑完保留供 review/合并">
+          <input
+            type="checkbox"
+            checked={!!m.worktree}
+            onChange={(e) => update({ worktree: e.target.checked })}
+          />
+          在隔离 git worktree 中运行(不改动 target 工作区)
+        </label>
         {m.mode === "auto" && hasClaude(m.steps) && (
           <div className="banner banner-warn">
             <span>⚠</span>

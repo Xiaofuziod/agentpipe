@@ -52,6 +52,31 @@ impl Executor {
         let _ = self.events.send(Event::RunStarted {
             name: self.manifest.name.clone(),
         });
+        // 隔离 worktree:开启则在跑任何 step 前建好,把 cwd 指向它。失败 fail-closed 终止,
+        // 绝不退回 target 原地跑(否则隔离形同虚设)。
+        if self.manifest.worktree {
+            match crate::worktree::create(&self.manifest.target, &self.manifest.name) {
+                Ok(wt) => {
+                    let _ = self.events.send(Event::WorktreeReady {
+                        path: wt.path.display().to_string(),
+                        branch: wt.branch,
+                    });
+                    self.ctx.cwd = wt.path;
+                }
+                Err(e) => {
+                    // 取内层 message,避免 "worktree 创建失败: worktree error: …" 双前缀
+                    let error = match e {
+                        crate::error::EngineError::Worktree(m) => m,
+                        other => other.to_string(),
+                    };
+                    let _ = self.events.send(Event::WorktreeFailed { error });
+                    let _ = self.events.send(Event::RunFinished {
+                        status: RunStatus::Failed,
+                    });
+                    return RunStatus::Failed;
+                }
+            }
+        }
         let steps = std::mem::take(&mut self.manifest.steps);
         let gated = matches!(self.manifest.mode, RunMode::Step);
         for step in &steps {

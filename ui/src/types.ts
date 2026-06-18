@@ -22,7 +22,7 @@ export type StepKind =
   | { kind: "loop"; until: "codex-clean"; max: number; body: Step[] };
 
 export type Step = { id: string } & StepKind;
-export type Manifest = { version: 1; name: string; target: string; mode: RunMode; steps: Step[] };
+export type Manifest = { version: 1; name: string; target: string; mode: RunMode; worktree?: boolean; steps: Step[] };
 
 export type GateKind = "step" | "human" | "decision";
 export type StepStatus = "Pending" | "Running" | "AwaitingGate" | "Done" | "Failed" | "Skipped";
@@ -38,6 +38,8 @@ export type EngineEvent =
   | { type: "StepAwaitingGate"; step_id: string; suggestion: string; expects_artifact: boolean; gate_kind: GateKind }
   | { type: "StepFinished"; step_id: string; status: StepStatus; summary: string; metrics?: StepMetrics | null }
   | { type: "StepFailed"; step_id: string; error: string }
+  | { type: "WorktreeReady"; path: string; branch: string }
+  | { type: "WorktreeFailed"; error: string }
   | { type: "LoopIteration"; loop_id: string; iteration: number }
   | { type: "LoopConverged"; loop_id: string; iterations: number }
   | { type: "LoopMaxReached"; loop_id: string; max: number }

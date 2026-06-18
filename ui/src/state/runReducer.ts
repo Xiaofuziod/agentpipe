@@ -22,6 +22,8 @@ export interface RunState {
   loops: Record<string, { iteration: number; result?: string }>;
   activeGate: GateView | null;
   runStatus: RunStatus | null;
+  worktree?: { path: string; branch: string }; // 隔离 worktree 就绪(开启时)
+  worktreeError?: string; // 隔离 worktree 创建失败 → Run fail-closed
   log: string[]; // 人读流水(封顶,见 LOG_CAP)
 }
 
@@ -82,6 +84,14 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
       };
     case "StepFailed":
       return { ...prev, ...setStep(prev, e.step_id, { status: "Failed", error: e.error }) };
+    case "WorktreeReady":
+      return {
+        ...prev,
+        worktree: { path: e.path, branch: e.branch },
+        log: pushLog(prev.log, `⑂ worktree ${e.branch} @ ${e.path}`),
+      };
+    case "WorktreeFailed":
+      return { ...prev, worktreeError: e.error, log: pushLog(prev.log, `✗ worktree: ${e.error}`) };
     case "LoopIteration":
       return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iteration } } };
     case "LoopConverged":

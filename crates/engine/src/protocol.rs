@@ -54,6 +54,10 @@ pub enum Event {
         metrics: Option<StepMetrics>,
     },
     StepFailed { step_id: String, error: String },
+    /// 隔离 worktree 创建成功:后续所有 step 在此 cwd 跑。RunStarted 之后立即发。
+    WorktreeReady { path: String, branch: String },
+    /// 隔离 worktree 创建失败:Run fail-closed 终止(不退回 target 原地跑)。
+    WorktreeFailed { error: String },
     LoopIteration { loop_id: String, iteration: u32 },
     LoopConverged { loop_id: String, iterations: u32 },
     LoopMaxReached { loop_id: String, max: u32 },

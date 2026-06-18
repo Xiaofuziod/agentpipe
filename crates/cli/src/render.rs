@@ -30,7 +30,11 @@ pub fn render_event(event: &Event) -> String {
         Event::StepStarted { step_id, kind } => format!("  ▷ [{kind}] {step_id}"),
         Event::StepProgress { line, .. } => format!("    {line}"),
         Event::StepFinished { step_id, status, summary, metrics } => {
-            let mark = if matches!(status, StepStatus::Skipped) { "⏭" } else { "✓" };
+            let mark = match status {
+                StepStatus::Skipped => "⏭",
+                StepStatus::Failed => "✗",
+                _ => "✓",
+            };
             let m = metrics
                 .as_ref()
                 .map(|m| format!(" · {}", format_metrics(m.num_turns, m.duration_ms, m.cost_usd)))
@@ -77,6 +81,17 @@ mod tests {
             gate_kind: agentpipe_engine::protocol::GateKind::Decision,
         };
         assert_eq!(render_event(&e), "  ⏸ plan: 审批");
+    }
+
+    #[test]
+    fn renders_finished_failed_with_cross_mark() {
+        let e = Event::StepFinished {
+            step_id: "build".into(),
+            status: StepStatus::Failed,
+            summary: "编译失败".into(),
+            metrics: None,
+        };
+        assert_eq!(render_event(&e), "  ✗ build: 编译失败");
     }
 
     #[test]

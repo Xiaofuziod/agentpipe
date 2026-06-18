@@ -64,11 +64,24 @@ pub struct RunRecorder {
 
 impl RunRecorder {
     /// RunStarted 时创建;run_dir 不存在则建。失败 → 调用方降级为不落盘。
+    /// run_id 时间戳仅秒级,同名任务同一秒内两次运行会撞名;用 create_new(O_EXCL)
+    /// 探测冲突并加序号退避(`<id>-2`、`-3`…),绝不静默截断已有审计日志。
     pub fn open(run_dir: &Path, name: &str) -> std::io::Result<Self> {
         fs::create_dir_all(run_dir)?;
-        let id = run_id(name, Utc::now());
-        let path = run_dir.join(format!("{id}.ndjson"));
-        let file = File::create(&path)?;
+        let base = run_id(name, Utc::now());
+        let mut id = base.clone();
+        let mut n = 1u32;
+        let (file, path) = loop {
+            let path = run_dir.join(format!("{id}.ndjson"));
+            match File::options().write(true).create_new(true).open(&path) {
+                Ok(f) => break (f, path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    n += 1;
+                    id = format!("{base}-{n}");
+                }
+                Err(e) => return Err(e),
+            }
+        };
         Ok(Self { writer: BufWriter::new(file), run_id: id, path })
     }
 
@@ -105,13 +118,23 @@ pub fn read_run(path: &Path) -> std::io::Result<Vec<RunEntry>> {
         event: Event,
     }
     let text = fs::read_to_string(path)?;
-    let out = text
+    let mut skipped = 0usize;
+    let out: Vec<RunEntry> = text
         .lines()
         .filter(|l| !l.trim().is_empty())
         // 容损:单行坏 JSON / 缺 event / 未知变体 → 跳过,不让一行废掉整次回放
-        .filter_map(|l| serde_json::from_str::<Row>(l).ok())
-        .map(|r| RunEntry { ts: r.ts, event: r.event })
+        .filter_map(|l| match serde_json::from_str::<Row>(l) {
+            Ok(r) => Some(RunEntry { ts: r.ts, event: r.event }),
+            Err(_) => {
+                skipped += 1;
+                None
+            }
+        })
         .collect();
+    // 容损但不静默:被丢的行要让用户知道(否则 view 可能因丢了末行 RunFinished 误报"未完成")
+    if skipped > 0 {
+        eprintln!("(read_run: 跳过 {skipped} 行无法解析的审计记录,回放可能不完整)");
+    }
     Ok(out)
 }
 
@@ -178,6 +201,17 @@ mod tests {
         assert!(!id.contains("--"), "不应有连续破折号: {id}");
         assert!(!id.ends_with('-'), "不应以破折号结尾: {id}");
         assert!(is_valid_run_id(&id), "应是合法 run-id: {id}");
+    }
+
+    #[test]
+    fn open_does_not_clobber_same_name_run() {
+        // 同名(同秒撞 run_id)两次 open 必须得到不同文件,绝不截断前一次
+        let dir = unique_dir("collide");
+        let r1 = RunRecorder::open(&dir, "same").unwrap();
+        let r2 = RunRecorder::open(&dir, "same").unwrap();
+        assert_ne!(r1.run_id(), r2.run_id(), "撞名时 run_id 应退避加序号");
+        assert_ne!(r1.path(), r2.path(), "撞名时落盘路径必须不同");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

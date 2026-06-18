@@ -44,6 +44,7 @@ STUB_VERDICT=clean \
 ## 模板
 
 - `templates/full-pipeline.yaml` — 完整 9 步全自动流程(brainstorm → Claude 审 → Codex 审 → 出执行文档 → 写码建 MR → code-review + simplify → Codex 审 MR 循环到干净 → 存记忆)
+- `templates/mr-review-loop.yaml` — 输入 MR 链接 → Codex 审 MR → Claude 按反馈修复并 push → 再审,循环直到 Codex 判定干净(`base` 改成该 MR 的目标分支)
 
 ## GUI(Tauri 桌面端)
 

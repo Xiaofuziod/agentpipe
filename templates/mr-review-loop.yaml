@@ -1,0 +1,41 @@
+version: 1
+name: "MR 审查-修复循环"
+# 目标仓库绝对路径(claude / codex 的工作目录;需能访问该 MR 对应的远程)
+target: <目标仓库绝对路径>
+# auto:除人工步骤外自动跑,审查-修复循环无需逐步批准
+mode: auto
+steps:
+  # 1. 输入要审查的 MR 链接(在批准对话框的「产物」框里粘贴链接)
+  - id: mr
+    kind: human
+    instruction: "把要审查的 MR / PR 链接粘贴到产物框,引擎会传给后续步骤。"
+    expects: "MR 链接"
+
+  # 切到该 MR 对应的分支:codex review-mr 审查的是本地工作区相对 base 的改动,
+  # 所以先让 claude 用链接把 target 仓库切到这个 MR 的分支。
+  - id: checkout
+    kind: claude
+    prompt: "把 target 仓库切到 MR {{mr.artifact}} 对应的分支:优先 `gh pr checkout {{mr.artifact}}`,失败则从链接解析出分支名,用 git fetch + git checkout 切过去。完成后只输出当前分支名。"
+
+  # 2~5. codex 审 MR → claude 按反馈修复并 push → 再审,循环直到 codex 判定干净。
+  # 循环每轮跑完 body(审 + 改)后判定 until:review 的 verdict=clean 即收敛退出。
+  - id: review-fix
+    kind: loop
+    until: codex-clean
+    max: 10                 # 最多循环轮数;到顶仍不干净则暂停交人决定(不静默放过)
+    body:
+      # 2 / 4. Codex 审查这个 MR 的改动
+      - id: review
+        kind: codex
+        action: review-mr
+        base: dev           # ← 改成该 MR 的目标分支(main / dev / master …)
+
+      # 3 / 5. 把 Codex 找到的问题交给 Claude 修复并提交回该 MR 分支
+      - id: fix
+        kind: claude
+        prompt: "按 Codex 对 MR {{mr.artifact}} 的审查反馈,逐条修复后提交并 push 到该 MR 分支。若反馈为空或无需改动,则不做任何改动直接结束本步。\n\nCodex 反馈:\n{{review.findings}}"
+
+  # 收尾:Codex 已审到干净
+  - id: done
+    kind: human
+    instruction: "Codex 审查已通过(无遗留问题),确认 MR {{mr.artifact}} 可合并。"

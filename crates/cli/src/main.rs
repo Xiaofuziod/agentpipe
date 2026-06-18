@@ -85,9 +85,10 @@ fn cmd_run(task: &str, dry_run: bool, json: bool) {
     let manifest = load_manifest(task);
 
     if dry_run {
-        println!("▶ 执行计划: {}", manifest.name);
+        if json { eprintln!("▶ 执行计划: {}", manifest.name); } else { println!("▶ 执行计划: {}", manifest.name); }
         for step in &manifest.steps {
-            println!("{}", render::render_plan_step(step));
+            let line = render::render_plan_step(step);
+            if json { eprintln!("{}", line); } else { println!("{}", line); }
         }
         return;
     }
@@ -140,7 +141,10 @@ fn cmd_run(task: &str, dry_run: bool, json: bool) {
             _ => {}
         }
     }
-    let _ = handle.join();
+    let status = handle.join().ok();
+    if !matches!(status, Some(agentpipe_engine::protocol::RunStatus::Success)) {
+        std::process::exit(1);
+    }
 }
 
 mod commands;

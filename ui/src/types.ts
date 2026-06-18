@@ -3,12 +3,13 @@ export type CodexAction = "review-doc" | "review-mr" | "ask";
 
 // 与 crates/engine/src/manifest.rs 的 Verify 手工镜像同步(挂在 claude 步骤上)
 export type Verify = {
-  by: "codex" | "claude";
+  by: "codex" | "claude" | "command";
   action?: CodexAction; // codex verifier 用
   base?: string;
   path?: string;
   prompt?: string; // codex(ask)或 claude(判定指令)
   skill?: string; // claude verifier 用
+  command?: string; // command verifier(exit 0 = 达成)
   max_retries?: number;
   on_unmet?: "gate" | "fail" | "continue";
   feedback?: boolean;
@@ -46,3 +47,22 @@ export type EngineCommand =
   | { type: "ApproveGate"; step_id: string; artifact: string | null }
   | { type: "SkipStep"; step_id: string }
   | { type: "Abort" };
+
+export type RunSummary = {
+  run_id: string;
+  name: string;
+  status: string | null;
+  total_cost_usd: number;
+  total_turns: number;
+  step_count: number;
+  complete: boolean;
+};
+
+export type DiffRow = {
+  step_id: string;
+  kind: "only_a" | "only_b" | "changed";
+  a_status: string | null;
+  a_cost: number | null;
+  b_status: string | null;
+  b_cost: number | null;
+};

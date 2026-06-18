@@ -60,4 +60,15 @@ mod tests {
         };
         assert_eq!(render_event(&e), "  ⏸ plan: 审批");
     }
+
+    #[test]
+    fn renders_finished_skipped_without_metrics() {
+        let e = Event::StepFinished {
+            step_id: "lint".into(),
+            status: StepStatus::Skipped,
+            summary: "no changes".into(),
+            metrics: None,
+        };
+        assert_eq!(render_event(&e), "  ⏭ lint: no changes");
+    }
 }

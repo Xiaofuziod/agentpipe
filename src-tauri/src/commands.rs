@@ -261,6 +261,7 @@ mod tests {
         assert_eq!(runs.len(), 2);
         // 倒序:run-id 时间戳前缀大的在前(两次同名不同 → 退避序号;断言总成本可读)
         assert!(runs.iter().all(|r| r.total_cost_usd > 0.0));
+        assert!(runs[0].run_id >= runs[1].run_id, "应按 run_id 倒序(最新在前): {:?}", runs.iter().map(|r| &r.run_id).collect::<Vec<_>>());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -325,6 +325,14 @@ impl Executor {
                     Err(e) => (Verdict::ChangesRequested, format!("校验执行失败: {e}")),
                 }
             }
+            Verifier::Command => {
+                let cmd = match &v.command {
+                    Some(c) if !c.trim().is_empty() => c.as_str(),
+                    _ => return (Verdict::ChangesRequested, "verify command 缺 command 字段".into()),
+                };
+                on_line("校验命令…", None);
+                command_verdict(cmd, &self.ctx.cwd, self.control.as_ref(), &mut |l| on_line(l, None))
+            }
         }
     }
 
@@ -452,10 +460,49 @@ fn parse_verdict(answer: &str) -> Verdict {
     Verdict::ChangesRequested
 }
 
+/// 用 shell 命令做校验门:exit 0 = 达成(Clean),否则 ChangesRequested(findings = 输出尾部)。
+/// 复用 runner::run_command(进程组 / pgid 登记 / abort kill 已就绪);`2>&1` 把 stderr 并进捕获。
+/// spawn / IO 失败、被信号杀死一律 fail-closed 为 ChangesRequested。
+fn command_verdict(
+    cmd: &str,
+    cwd: &std::path::Path,
+    control: &crate::control::Control,
+    on_line: &mut dyn FnMut(&str),
+) -> (Verdict, String) {
+    let shell_cmd = format!("{cmd} 2>&1");
+    match crate::runner::run_command(
+        "sh",
+        &["-c".into(), shell_cmd],
+        cwd,
+        None,
+        None,
+        Some(control),
+        on_line,
+    ) {
+        Ok((_, true)) => (Verdict::Clean, String::new()),
+        Ok((out, false)) => (Verdict::ChangesRequested, tail(&out, 4096)),
+        Err(e) => (Verdict::ChangesRequested, format!("校验执行失败: {e}")),
+    }
+}
+
+/// 取字符串末 max_bytes 字节,向后对齐到 char 边界(不切碎 UTF-8)。
+fn tail(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut start = s.len() - max_bytes;
+    while start < s.len() && !s.is_char_boundary(start) {
+        start += 1;
+    }
+    s[start..].to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_verdict;
+    use super::{command_verdict, parse_verdict, tail};
     use crate::context::Verdict;
+    use crate::control::Control;
+    use std::path::Path;
 
     #[test]
     fn parse_verdict_reads_sentinel() {
@@ -468,5 +515,47 @@ mod tests {
     fn parse_verdict_fail_closed_without_sentinel() {
         assert!(matches!(parse_verdict("没有判定行"), Verdict::ChangesRequested));
         assert!(matches!(parse_verdict(""), Verdict::ChangesRequested));
+    }
+
+    #[test]
+    fn command_verdict_exit_zero_is_clean() {
+        let ctrl = Control::default();
+        let (v, f) = command_verdict("exit 0", Path::new("."), &ctrl, &mut |_l| {});
+        assert!(matches!(v, Verdict::Clean));
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn command_verdict_nonzero_is_changes_with_output() {
+        let ctrl = Control::default();
+        let (v, f) = command_verdict("echo boom; exit 1", Path::new("."), &ctrl, &mut |_l| {});
+        assert!(matches!(v, Verdict::ChangesRequested));
+        assert!(f.contains("boom"));
+    }
+
+    #[test]
+    fn command_verdict_missing_binary_fail_closed() {
+        let ctrl = Control::default();
+        let (v, _f) = command_verdict("definitely_not_a_real_cmd_xyz", Path::new("."), &ctrl, &mut |_l| {});
+        assert!(matches!(v, Verdict::ChangesRequested));
+    }
+
+    #[test]
+    fn command_verdict_spawn_failure_fail_closed() {
+        let ctrl = Control::default();
+        // 不存在的 cwd → spawn 失败 → run_command 返回 Err → 走 "校验执行失败" 分支
+        let (v, f) = command_verdict("echo hi", Path::new("/nonexistent/agentpipe/xyz"), &ctrl, &mut |_l| {});
+        assert!(matches!(v, Verdict::ChangesRequested));
+        assert!(f.contains("校验执行失败"), "Err 分支文案不对: {f}");
+    }
+
+    #[test]
+    fn tail_keeps_suffix_on_char_boundary() {
+        assert_eq!(tail("hello", 100), "hello");
+        assert_eq!(tail("abcdefgh", 3), "fgh");
+        // 多字节字符不被切碎
+        let s = "藏字符串末尾"; // 每个汉字 3 字节
+        let t = tail(s, 4); // 4 字节落在某汉字中间,应向后对齐到边界
+        assert!(s.ends_with(&t));
     }
 }

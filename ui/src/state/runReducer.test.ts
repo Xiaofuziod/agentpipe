@@ -59,6 +59,52 @@ describe("runReducer", () => {
     expect(s.steps.impl.status).toBe("Running"); // 进度行不改状态
   });
 
+  it("accumulates every progress line per step (展开态看完整/实时输出)", () => {
+    let s = initialRunState();
+    s = runReducer(s, { type: "StepStarted", step_id: "impl", kind: "claude" });
+    s = runReducer(s, { type: "StepProgress", step_id: "impl", line: "行1" });
+    s = runReducer(s, { type: "StepProgress", step_id: "impl", line: "行2" });
+    s = runReducer(s, { type: "StepProgress", step_id: "impl", line: "行3" });
+    expect(s.steps.impl.lines).toEqual(["行1", "行2", "行3"]);
+    // 终态保留输出行,供回看展开
+    s = runReducer(s, { type: "StepFinished", step_id: "impl", status: "Done", summary: "ok" });
+    expect(s.steps.impl.lines).toEqual(["行1", "行2", "行3"]);
+  });
+
+  it("resets per-step view on re-StepStarted (loop 内同 id 重跑不串味)", () => {
+    let s = initialRunState();
+    // 第一次迭代:产出输出 + 终态摘要/度量
+    s = runReducer(s, { type: "StepStarted", step_id: "fix", kind: "claude" });
+    s = runReducer(s, { type: "StepProgress", step_id: "fix", line: "iter1-行1", round: 1 });
+    s = runReducer(s, {
+      type: "StepFinished",
+      step_id: "fix",
+      status: "Done",
+      summary: "iter1 done",
+      metrics: { num_turns: 1, duration_ms: 1000, cost_usd: 0.1 },
+    });
+    // 第二次迭代:同 step_id 重新开始 → 上一轮的 lines/summary/metrics/round 必须清掉
+    s = runReducer(s, { type: "StepStarted", step_id: "fix", kind: "claude" });
+    expect(s.steps.fix.lines).toBeUndefined();
+    expect(s.steps.fix.lastLine).toBeUndefined();
+    expect(s.steps.fix.summary).toBeUndefined();
+    expect(s.steps.fix.metrics).toBeUndefined();
+    expect(s.steps.fix.round).toBeUndefined();
+    s = runReducer(s, { type: "StepProgress", step_id: "fix", line: "iter2-行1" });
+    expect(s.steps.fix.lines).toEqual(["iter2-行1"]); // 只剩本轮输出
+  });
+
+  it("caps per-step lines at 500 (防长 run 撑爆)", () => {
+    let s = initialRunState();
+    s = runReducer(s, { type: "StepStarted", step_id: "impl", kind: "claude" });
+    for (let i = 0; i < 600; i++) {
+      s = runReducer(s, { type: "StepProgress", step_id: "impl", line: `l-${i}` });
+    }
+    expect(s.steps.impl.lines).toHaveLength(500);
+    expect(s.steps.impl.lines?.[0]).toBe("l-100"); // 保留最近 500
+    expect(s.steps.impl.lines?.[499]).toBe("l-599");
+  });
+
   it("tracks round from StepProgress and metrics from StepFinished", () => {
     let s = initialRunState();
     s = runReducer(s, { type: "StepStarted", step_id: "impl", kind: "claude" });

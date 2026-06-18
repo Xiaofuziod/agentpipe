@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Composer } from "./composer/Composer";
 import { Console } from "./console/Console";
 import { ProjectsPanel } from "./records/ProjectsPanel";
@@ -85,8 +85,9 @@ export default function App() {
     }
   }, [runs.selectedId, runs.activeId]);
 
-  // 项目化:按 target 把历史 run 归类(左列 + 快跑栏下拉共用)
-  const projects = groupByProject(hist.summaries);
+  // 项目化:按 target 把历史 run 归类(快跑栏下拉 + 默认 target 用;memo 化避免每渲染
+  // 重算新数组拖累下方 effect 依赖。左列 ProjectsPanel 走 filteredSummaries 自行归类)。
+  const projects = useMemo(() => groupByProject(hist.summaries), [hist.summaries]);
 
   // 默认活跃 target = 最近用过的项目(首次有历史且尚未选 target 时)
   useEffect(() => {

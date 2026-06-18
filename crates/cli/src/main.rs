@@ -151,8 +151,8 @@ fn prompt_gate(step_id: &str, expects_artifact: bool) -> Command {
     } else {
         "[y 批准 / s 跳过]"
     };
-    print!("    > {hint} ");
-    let _ = std::io::stdout().flush();
+    eprint!("    > {hint} ");
+    let _ = std::io::stderr().flush();
     let mut line = String::new();
     let n = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
     // read_line 返回 0 = EOF(stdin 关闭 / 管道结束 / Ctrl-D):无人在回路,

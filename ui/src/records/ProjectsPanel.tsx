@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { RunSummary } from "../types";
 import { groupByProject, projectName, type Project } from "../state/projects";
 
@@ -54,22 +54,24 @@ export function ProjectsPanel({
   // 折叠的项目 target 集合(默认全展开)
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
-  // 按 target 归类历史 run
-  const projects: Project[] = groupByProject(summaries);
+  // 按 target 归类历史 run(memo 化:仅 summaries 变才重算,且绝不就地改它)
+  const grouped = useMemo<Project[]>(() => groupByProject(summaries), [summaries]);
 
-  // live run 合并进对应项目:无匹配项目则合成一个置顶的空项目(全新 target 首跑)
-  if (liveRun) {
-    const exists = projects.some((p) => p.target === liveRun.target);
-    if (!exists) {
-      projects.unshift({
-        target: liveRun.target,
-        name: projectName(liveRun.target),
-        runs: [],
-        totalCost: 0,
-        latestRunId: "",
-      });
-    }
-  }
+  // live run 合并进对应项目:无匹配项目则合成一个置顶空项目(全新 target 首跑)。
+  // 用 spread 建新数组,绝不 unshift 改 memo 化的 grouped(否则跨渲染累积重复项)。
+  const projects =
+    liveRun && !grouped.some((p) => p.target === liveRun.target)
+      ? [
+          {
+            target: liveRun.target,
+            name: projectName(liveRun.target),
+            runs: [],
+            totalCost: 0,
+            latestRunId: "",
+          },
+          ...grouped,
+        ]
+      : grouped;
 
   const totalRuns = (liveRun ? 1 : 0) + summaries.length;
 

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { ipc } from "../ipc";
 import type { StepStatus } from "../types";
 import type { RunRecord } from "../state/useRuns";
-import type { RunState } from "../state/runReducer";
+import type { RunState, StepView } from "../state/runReducer";
+import { projectName } from "../state/projects";
 import { GatePrompt } from "./GatePrompt";
 
 const MARK: Record<StepStatus, string> = {
@@ -73,6 +74,16 @@ export function Console({
   const live = !replayState && isLive && !!state && !state.runStatus;
   const now = useNow(live);
 
+  // 每步展开/折叠:默认只展开"焦点步"——正在运行的步;无运行步时是最后一步
+  // (run 结束后保持最后一步展开,不在完工瞬间把正在看的输出收走)。用户点击可覆盖。
+  const [expandOverride, setExpandOverride] = useState<Record<string, boolean>>({});
+  const focusId =
+    state?.order.find((id) => state.steps[id].status === "Running") ??
+    state?.order[state.order.length - 1];
+  const isExpanded = (id: string) => expandOverride[id] ?? id === focusId;
+  const toggleExpand = (id: string) =>
+    setExpandOverride((o) => ({ ...o, [id]: !isExpanded(id) }));
+
   return (
     <>
       <div className="pane-header">
@@ -111,31 +122,26 @@ export function Console({
               </div>
             )}
             <div className="console-feed">
-              {state.order.map((id) => {
-                const st = state.steps[id];
-                const running = st.status === "Running";
-                // 运行中:显示最近进度行(尚无 summary);终态:显示 summary/error
-                const main = running ? st.lastLine ?? "" : st.summary ?? st.error ?? "";
-                return (
-                  <div key={id} className={`console-line st-${st.status}`}>
-                    <span className="mark">{MARK[st.status]}</span>
-                    <span className="cid">{id}</span>
-                    {running && st.round != null && <span className="cline-round">第 {st.round} 轮</span>}
-                    <span className="cline-main">{main}</span>
-                    {st.metrics && <span className="cline-metrics">{fmtMetrics(st.metrics)}</span>}
-                    {running && st.startedAt != null && (
-                      <span className="cline-timer">{fmtElapsed(now - st.startedAt)}</span>
-                    )}
-                  </div>
-                );
-              })}
+              {state.order.map((id) => (
+                <StepLine
+                  key={id}
+                  id={id}
+                  st={state.steps[id]}
+                  now={now}
+                  expanded={isExpanded(id)}
+                  onToggle={() => toggleExpand(id)}
+                />
+              ))}
               {Object.entries(state.loops).map(([id, l]) => (
                 <div key={id} className="console-line">
-                  <span className="mark loop-tick">↻</span>
-                  <span className="cid">{id}</span>
-                  <span>
-                    {l.iteration} 轮{l.result ? `(${l.result})` : ""}
-                  </span>
+                  <div className="cline-head">
+                    <span className="cline-caret" />
+                    <span className="mark loop-tick">↻</span>
+                    <span className="cid">{id}</span>
+                    <span>
+                      {l.iteration} 轮{l.result ? `(${l.result})` : ""}
+                    </span>
+                  </div>
                 </div>
               ))}
               {state.order.length === 0 && (
@@ -169,6 +175,64 @@ export function Console({
   );
 }
 
+/** 单步行:折叠态一行(mark/id/main/metrics/timer),有进度行时可展开看完整/实时输出。 */
+function StepLine({
+  id,
+  st,
+  now,
+  expanded,
+  onToggle,
+}: {
+  id: string;
+  st: StepView;
+  now: number;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const running = st.status === "Running";
+  // 运行中:折叠态显示最近进度行(尚无 summary);终态:显示 summary/error
+  const main = running ? st.lastLine ?? "" : st.summary ?? st.error ?? "";
+  const lines = st.lines ?? [];
+  const hasLines = lines.length > 0;
+  const feedRef = useRef<HTMLDivElement>(null);
+
+  // 实时:展开 + 运行中时,新进度行到达把输出滚到底
+  useEffect(() => {
+    if (expanded && running && feedRef.current) {
+      feedRef.current.scrollTop = feedRef.current.scrollHeight;
+    }
+  }, [expanded, running, lines.length]);
+
+  return (
+    <div className={`console-line st-${st.status}`}>
+      <div
+        className={`cline-head ${hasLines ? "expandable" : ""}`}
+        onClick={hasLines ? onToggle : undefined}
+        title={hasLines ? (expanded ? "折叠输出" : `展开输出(${lines.length} 行)`) : undefined}
+      >
+        <span className="cline-caret">{hasLines ? (expanded ? "▾" : "▸") : ""}</span>
+        <span className="mark">{MARK[st.status]}</span>
+        <span className="cid">{id}</span>
+        {running && st.round != null && <span className="cline-round">第 {st.round} 轮</span>}
+        <span className="cline-main">{main}</span>
+        {st.metrics && <span className="cline-metrics">{fmtMetrics(st.metrics)}</span>}
+        {running && st.startedAt != null && (
+          <span className="cline-timer">{fmtElapsed(now - st.startedAt)}</span>
+        )}
+      </div>
+      {hasLines && expanded && (
+        <div className="cline-feed" ref={feedRef}>
+          {lines.map((ln, i) => (
+            <div key={i} className="cline-feed-row">
+              {ln}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** 控制台底部常驻 prompt 栏:输入一段 prompt → 直接跑一个单 claude step 的 run。 */
 function ConsolePromptBar({
   busy,
@@ -189,7 +253,7 @@ function ConsolePromptBar({
   const [menuOpen, setMenuOpen] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
-  const targetName = quickTarget ? quickTarget.split(/[\\/]/).filter(Boolean).pop() : null;
+  const targetName = quickTarget ? projectName(quickTarget) : null;
   const canRun = !busy && prompt.trim().length > 0 && !!quickTarget;
 
   // 随内容自增高(上限交给 CSS max-height + 滚动)

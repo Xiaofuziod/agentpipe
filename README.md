@@ -62,3 +62,4 @@ stub 演示同 CLI:设 `AGENTPIPE_CLAUDE_BIN` / `AGENTPIPE_CODEX_BIN` 指向 `te
 - `docs/specs/2026-06-16-design.md` — 架构与协议
 - `docs/plans/2026-06-16-agentpipe-engine.md` — 实施计划
 - `docs/specs/2026-06-18-project-grouping-design.md` — 左列项目化(Codex 式 project = target)
+- `docs/specs/2026-06-18-step-output-expand-design.md` — 控制台单步输出可展开/折叠(实时输出)

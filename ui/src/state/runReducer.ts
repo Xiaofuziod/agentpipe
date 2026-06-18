@@ -5,7 +5,8 @@ export interface StepView {
   summary?: string;
   error?: string;
   startedAt?: number; // 进入 Running 的 UI 时刻(实时秒表用)
-  lastLine?: string; // 最近一条进度行(运行中展示)
+  lastLine?: string; // 最近一条进度行(折叠态单行展示)
+  lines?: string[]; // 全部进度行(展开态看实时/完整输出;封顶见 STEP_LINE_CAP)
   round?: number; // 当前模型请求轮次(claude stream-json)
   metrics?: StepMetrics; // 终态度量(轮次/耗时/成本)
 }
@@ -29,6 +30,12 @@ export interface RunState {
 }
 
 const LOG_CAP = 1000;
+const STEP_LINE_CAP = 500; // 每步保留的进度行上限(展开态滚动查看;封顶防长 run 撑爆内存)
+
+function appendLine(lines: string[] | undefined, line: string): string[] {
+  const next = lines ? [...lines, line] : [line];
+  return next.length > STEP_LINE_CAP ? next.slice(-STEP_LINE_CAP) : next;
+}
 
 export const initialRunState = (): RunState => ({
   name: "",
@@ -60,13 +67,31 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
     case "RunStarted":
       return { ...prev, name: e.name, target: e.target ?? "", log: pushLog(prev.log, `▶ ${e.name}`) };
     case "StepProgress": {
-      const patch: Partial<StepView> = { lastLine: e.line };
+      const patch: Partial<StepView> = {
+        lastLine: e.line,
+        lines: appendLine(prev.steps[e.step_id]?.lines, e.line),
+      };
       if (e.round != null) patch.round = e.round;
       // 有进度行 = 引擎已恢复执行,清掉可能残留的 gate(决策门批准后重试不发 StepStarted)
       return { ...prev, ...setStep(prev, e.step_id, patch), activeGate: null, log: pushLog(prev.log, `  ${e.line}`) };
     }
     case "StepStarted":
-      return { ...prev, ...setStep(prev, e.step_id, { status: "Running", startedAt: Date.now() }), activeGate: null };
+      // 重新开始(含 loop 内同 id 重跑):清掉上一次迭代的视图,否则展开输出会跨迭代
+      // 累积、而 summary/metrics 只反映最后一次,二者串味不一致。
+      return {
+        ...prev,
+        ...setStep(prev, e.step_id, {
+          status: "Running",
+          startedAt: Date.now(),
+          lines: undefined,
+          lastLine: undefined,
+          summary: undefined,
+          error: undefined,
+          metrics: undefined,
+          round: undefined,
+        }),
+        activeGate: null,
+      };
     case "StepAwaitingGate":
       return {
         ...prev,

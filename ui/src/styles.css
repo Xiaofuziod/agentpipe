@@ -908,6 +908,81 @@ body {
   font-family: var(--mono);
   font-size: 13px;
 }
+
+/* ---------- 历史记录 meta 扩展 ---------- */
+/* 成本小字 */
+.rec-cost {
+  color: var(--accent-dim);
+}
+/* 未完整结束警告图标 */
+.rec-incomplete {
+  font-size: 11px;
+  color: var(--warn);
+  flex-shrink: 0;
+}
+/* 对比 checkbox */
+.compare-checkbox {
+  width: 13px;
+  height: 13px;
+  accent-color: var(--purple);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.compare-checkbox:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* 状态点:warn(未完整结束) */
+.status-dot.warn {
+  background: var(--warn);
+}
+
+/* ---------- DiffView 浮层 ---------- */
+.diff-drawer {
+  width: 480px;
+}
+.diff-run-labels {
+  display: flex;
+  gap: var(--sp-lg);
+  padding: var(--sp-sm) var(--sp-lg);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.diff-label-a {
+  color: var(--danger);
+}
+.diff-label-b {
+  color: var(--accent);
+}
+.diff-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-xxs);
+}
+.diff-row {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  padding: var(--sp-xs) var(--sp-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+}
+.diff-row-only_a {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: rgba(255, 95, 110, 0.2);
+}
+.diff-row-only_b {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: rgba(46, 240, 143, 0.2);
+}
+.diff-row-changed {
+  color: var(--warn);
+  background: var(--warn-soft);
+  border-color: rgba(245, 177, 68, 0.2);
+}
 .run-result .Success {
   color: var(--accent);
 }

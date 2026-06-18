@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Step, StepKind, CodexAction, Verify } from "../types";
 import { KINDS, defaultsFor, StepRow } from "./StepCard";
 import { setVerifyEnabled, patchVerify } from "./verifyEdit";
@@ -195,6 +195,7 @@ function VerifySection({
   onChange: (s: Step) => void;
 }) {
   const [open, setOpen] = useState(!!step.verify);
+  useEffect(() => { setOpen(!!step.verify); }, [step.id]);
   const v = step.verify;
   const patch = (p: Partial<Verify>) => onChange(patchVerify(step, p));
 
@@ -228,7 +229,10 @@ function VerifySection({
             <select
               className="select"
               value={v.by}
-              onChange={(e) => patch({ by: e.target.value as Verify["by"] })}
+              onChange={(e) => {
+                const by = e.target.value as Verify["by"];
+                patch({ by, action: undefined, base: undefined, path: undefined, prompt: undefined, skill: undefined, command: undefined });
+              }}
             >
               <option value="codex">codex</option>
               <option value="claude">claude</option>

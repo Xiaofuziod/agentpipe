@@ -52,6 +52,11 @@ pub fn view(run_id: &str) {
         // 只读:render_event 不碰 stdin,AwaitingGate 仅显示当时在等待
         println!("{}", render_event(&entry.event));
     }
+    use agentpipe_engine::protocol::Event;
+    let complete = matches!(entries.last().map(|e| &e.event), Some(Event::RunFinished { .. }));
+    if !complete {
+        println!("⚠ 未完成(无 RunFinished,可能中断/崩溃)");
+    }
 }
 
 pub fn cost(run_id: &str) {

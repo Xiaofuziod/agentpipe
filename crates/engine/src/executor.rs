@@ -327,12 +327,11 @@ impl Executor {
             }
             Verifier::Command => {
                 let cmd = match &v.command {
-                    Some(c) if !c.trim().is_empty() => c.clone(),
+                    Some(c) if !c.trim().is_empty() => c.as_str(),
                     _ => return (Verdict::ChangesRequested, "verify command 缺 command 字段".into()),
                 };
                 on_line("校验命令…", None);
-                let mut fwd = |l: &str| on_line(l, None);
-                command_verdict(&cmd, &self.ctx.cwd, self.control.as_ref(), &mut fwd)
+                command_verdict(cmd, &self.ctx.cwd, self.control.as_ref(), &mut |l| on_line(l, None))
             }
         }
     }

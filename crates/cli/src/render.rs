@@ -18,6 +18,11 @@ pub fn render_plan_step(step: &Step) -> String {
     format!("  - {} [{detail}]", step.id)
 }
 
+/// StepMetrics 的人读片段:`N 轮 · X.Xs · $Y.YY`。render_event 与 cost 子命令共用,避免格式漂移。
+pub fn format_metrics(num_turns: u32, duration_ms: u64, cost_usd: f64) -> String {
+    format!("{} 轮 · {:.1}s · ${:.2}", num_turns, duration_ms as f64 / 1000.0, cost_usd)
+}
+
 /// 事件 → 人读一行。纯函数:无任何 I/O / stdin,view / dry-run / run 共用。
 pub fn render_event(event: &Event) -> String {
     match event {
@@ -28,12 +33,7 @@ pub fn render_event(event: &Event) -> String {
             let mark = if matches!(status, StepStatus::Skipped) { "⏭" } else { "✓" };
             let m = metrics
                 .as_ref()
-                .map(|m| format!(
-                    " · {} 轮 · {:.1}s · ${:.2}",
-                    m.num_turns,
-                    m.duration_ms as f64 / 1000.0,
-                    m.cost_usd
-                ))
+                .map(|m| format!(" · {}", format_metrics(m.num_turns, m.duration_ms, m.cost_usd)))
                 .unwrap_or_default();
             format!("  {mark} {step_id}: {summary}{m}")
         }

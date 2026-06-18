@@ -8,6 +8,8 @@ pub enum EngineError {
     Validation(String),
     #[error("cli error: {0}")]
     Cli(String),
+    #[error("worktree error: {0}")]
+    Worktree(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }

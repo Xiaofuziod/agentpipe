@@ -71,6 +71,43 @@ pub fn cost(run_id: &str) {
     println!("总计: {} 轮 · {:.1}s · ${:.2}", s.total_turns, s.total_duration_ms as f64 / 1000.0, s.total_cost_usd);
 }
 
-pub fn diff(_a: &str, _b: &str) {
-    eprintln!("(diff 未实现)");
+pub fn diff(a: &str, b: &str) {
+    let (Some(pa), Some(pb)) = (run_path(a), run_path(b)) else { std::process::exit(2) };
+    let (ea, eb) = match (read_run(&pa), read_run(&pb)) {
+        (Ok(ea), Ok(eb)) => (ea, eb),
+        _ => {
+            eprintln!("读取 run 失败");
+            std::process::exit(1);
+        }
+    };
+
+    // 按 step_id 提取终态(status + cost),对比两次 run。
+    use agentpipe_engine::protocol::Event;
+    use std::collections::BTreeMap;
+    fn finals(entries: &[agentpipe_engine::audit::RunEntry]) -> BTreeMap<String, (String, f64)> {
+        let mut m = BTreeMap::new();
+        for e in entries {
+            if let Event::StepFinished { step_id, status, metrics, .. } = &e.event {
+                let cost = metrics.as_ref().map(|x| x.cost_usd).unwrap_or(0.0);
+                m.insert(step_id.clone(), (format!("{status:?}"), cost));
+            }
+        }
+        m
+    }
+    let (fa, fb) = (finals(&ea), finals(&eb));
+    let mut keys: Vec<&String> = fa.keys().chain(fb.keys()).collect();
+    keys.sort();
+    keys.dedup();
+
+    println!("diff {a} ↔ {b}");
+    for k in keys {
+        match (fa.get(k), fb.get(k)) {
+            (Some(x), None) => println!("  - {k}: 仅 A ({})", x.0),
+            (None, Some(y)) => println!("  + {k}: 仅 B ({})", y.0),
+            (Some(x), Some(y)) if x != y => {
+                println!("  ~ {k}: {} ${:.2} → {} ${:.2}", x.0, x.1, y.0, y.1);
+            }
+            _ => {}
+        }
+    }
 }

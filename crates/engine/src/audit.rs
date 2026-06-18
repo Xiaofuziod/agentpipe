@@ -40,7 +40,7 @@ pub fn is_valid_run_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-use crate::protocol::Event;
+use crate::protocol::{Event, StepMetrics};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -86,6 +86,54 @@ impl RunRecorder {
     pub fn path(&self) -> &Path {
         &self.path
     }
+}
+
+/// 一条审计记录:落盘时刻 + 反序列化出的事件。
+#[derive(Debug, Clone)]
+pub struct RunEntry {
+    pub ts: String,
+    pub event: Event,
+}
+
+/// 读 NDJSON;跳过空行与解析失败的行(容损,不让单行坏数据废掉整次回放)。
+pub fn read_run(path: &Path) -> std::io::Result<Vec<RunEntry>> {
+    let text = fs::read_to_string(path)?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let ts = v.get("ts").and_then(|t| t.as_str()).unwrap_or("").to_string();
+        if let Some(ev) = v.get("event") {
+            if let Ok(event) = serde_json::from_value::<Event>(ev.clone()) {
+                out.push(RunEntry { ts, event });
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// 一次 run 的成本/耗时聚合。
+#[derive(Debug, Default, PartialEq)]
+pub struct CostSummary {
+    pub steps: Vec<(String, StepMetrics)>,
+    pub total_cost_usd: f64,
+    pub total_turns: u32,
+    pub total_duration_ms: u64,
+}
+
+pub fn aggregate_cost(entries: &[RunEntry]) -> CostSummary {
+    let mut s = CostSummary::default();
+    for e in entries {
+        if let Event::StepFinished { step_id, metrics: Some(m), .. } = &e.event {
+            s.total_cost_usd += m.cost_usd;
+            s.total_turns += m.num_turns;
+            s.total_duration_ms += m.duration_ms;
+            s.steps.push((step_id.clone(), m.clone()));
+        }
+    }
+    s
 }
 
 #[cfg(test)]
@@ -155,5 +203,49 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["event"]["type"], "StepFailed");
         assert_eq!(v["event"]["error"], "boom");
+    }
+
+    #[test]
+    fn read_run_roundtrips_recorder_output() {
+        use crate::protocol::StepStatus;
+
+        let dir = unique_dir("read");
+        let mut r = RunRecorder::open(&dir, "x").unwrap();
+        r.record(&Event::RunStarted { name: "x".into() });
+        r.record(&Event::StepFinished {
+            step_id: "impl".into(),
+            status: StepStatus::Done,
+            summary: "ok".into(),
+            metrics: Some(StepMetrics { num_turns: 3, duration_ms: 1000, cost_usd: 0.5 }),
+        });
+        let path = r.path().to_path_buf();
+        drop(r);
+
+        let entries = read_run(&path).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(matches!(entries[0].event, Event::RunStarted { .. }));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn aggregate_cost_sums_step_metrics() {
+        use crate::protocol::StepStatus;
+
+        let entries = vec![
+            RunEntry { ts: "".into(), event: Event::RunStarted { name: "x".into() } },
+            RunEntry { ts: "".into(), event: Event::StepFinished {
+                step_id: "a".into(), status: StepStatus::Done, summary: "".into(),
+                metrics: Some(StepMetrics { num_turns: 2, duration_ms: 1000, cost_usd: 0.30 }),
+            }},
+            RunEntry { ts: "".into(), event: Event::StepFinished {
+                step_id: "b".into(), status: StepStatus::Done, summary: "".into(),
+                metrics: Some(StepMetrics { num_turns: 5, duration_ms: 2000, cost_usd: 0.70 }),
+            }},
+        ];
+        let s = aggregate_cost(&entries);
+        assert_eq!(s.steps.len(), 2);
+        assert_eq!(s.total_turns, 7);
+        assert_eq!(s.total_duration_ms, 3000);
+        assert!((s.total_cost_usd - 1.0).abs() < 1e-9);
     }
 }

@@ -25,6 +25,7 @@
   --accent: #2ef08f;
   --accent-dim: #1ea968;
   --accent-soft: rgba(46, 240, 143, 0.12);
+  --accent-border: rgba(46, 240, 143, 0.2);
   --accent-glow: rgba(46, 240, 143, 0.30);
 
   /* 次色:紫 / 品红 */
@@ -34,8 +35,10 @@
   /* 语义色 */
   --danger: #ff5f6e;
   --danger-soft: rgba(255, 95, 110, 0.12);
+  --danger-border: rgba(255, 95, 110, 0.2);
   --warn: #f5b144;
   --warn-soft: rgba(245, 177, 68, 0.10);
+  --warn-border:   rgba(245, 177, 68, 0.2);
   --info: #56b6ff;
 
   /* 形状 */
@@ -971,17 +974,17 @@ body {
 .diff-row-only_a {
   color: var(--danger);
   background: var(--danger-soft);
-  border-color: rgba(255, 95, 110, 0.2);
+  border-color: var(--danger-border);
 }
 .diff-row-only_b {
   color: var(--accent);
   background: var(--accent-soft);
-  border-color: rgba(46, 240, 143, 0.2);
+  border-color: var(--accent-border);
 }
 .diff-row-changed {
   color: var(--warn);
   background: var(--warn-soft);
-  border-color: rgba(245, 177, 68, 0.2);
+  border-color: var(--warn-border);
 }
 .run-result .Success {
   color: var(--accent);

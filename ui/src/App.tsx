@@ -53,11 +53,29 @@ export default function App() {
     if (prev !== null && cur === null) {
       // run 刚结束
       hist.refresh();
-      // 结束后切换选中到 live 记录的最终快照(in-memory),保持用户能看到结果
-      // live 条已包含终态,不需要额外切换; selectedId 还指向 live 记录
     }
     prevActiveId.current = cur;
   }, [runs.activeId, hist]);
+
+  // Run 结束后:当 hist.summaries 刷新时,若仍在 live 选中态且 run 已结束,
+  // 尝试切换到对应持久化记录(高亮左侧行,保持内容一致)
+  useEffect(() => {
+    if (
+      selection?.kind !== "live" ||
+      runs.activeId !== null ||
+      liveRunIdRef.current === null
+    ) {
+      return;
+    }
+    const liveId = liveRunIdRef.current;
+    const matched = hist.summaries.find((s) => s.run_id === liveId);
+    if (!matched) return;
+    // 找到持久化记录:切换选中并清除 ref(只触发一次)
+    liveRunIdRef.current = null;
+    hist.openState(liveId).then((state) => {
+      setSelection({ kind: "history", runId: liveId, state });
+    });
+  }, [hist.summaries, selection, runs.activeId, hist]);
 
   // 同步 useRuns 内部的 selectedId 变化 → 如果 live record 被 useRuns 自动选中,同步到 selection
   useEffect(() => {

@@ -91,17 +91,22 @@ fn verify_once(&self, v: &Verify, on_line: &mut dyn FnMut(&str, Option<u32>)) ->
                 _ => return (Verdict::ChangesRequested, "verify command 缺 command 字段".into()),
             };
             on_line(&format!("校验命令: {cmd}"), None);
-            match run_verify_command(cmd, &self.ctx.cwd) {
-                Ok(0)            => (Verdict::Clean, String::new()),
-                Ok(code)         => (Verdict::ChangesRequested, format!("命令退出码 {code}\n{output_tail}")),
-                Err(e)           => (Verdict::ChangesRequested, format!("命令执行失败: {e}")),
+            // 返回 (exit_code, 合并输出尾部);Err = spawn/IO 失败
+            match run_verify_command(cmd, &self.ctx.cwd, self.control.as_ref()) {
+                Ok((0, _))       => (Verdict::Clean, String::new()),
+                Ok((code, tail)) => (Verdict::ChangesRequested, format!("命令退出码 {code}\n{tail}")),
+                Err(e)           => (Verdict::ChangesRequested, format!("校验执行失败: {e}")),
             }
         }
     }
 }
 ```
 
-`run_verify_command`:`Command::new("sh").arg("-c").arg(cmd).current_dir(cwd)` + 捕获输出 + 返回 exit code。受 `control.is_aborted` 兜底(与现有 runner 一致,abort 时不再起新命令)。
+`run_verify_command(cmd, cwd, control) -> Result<(i32, String)>`:
+
+- `Command::new("sh").arg("-c").arg(cmd).current_dir(cwd)`,stdout+stderr 合并捕获,返回 `(exit_code, 输出尾部 ≤4KB)`。被信号杀死(无 exit code)按 `Err` 处理 → fail-closed。
+- **可中断性**:与现有 runner 一致 —— spawn 前查 `control.is_aborted()`;spawn 后把子进程 pgid 注册到 `control.set_current(...)`,使 abort 能 `control.kill_current()` 杀掉长命令(`cargo test` 这类不会卡死整个 run)。`claude.run` / `codex.review` 现在正是这么做的(都收 `Some(self.control.as_ref())`),command 不得偷懒只查 flag。
+- 错误文案沿用现有 verify_once 的"校验执行失败"(executor.rs:307/325),不另造一套。
 
 下游不变:返回 `Verdict::ChangesRequested` 即触发现有 `Unmet` 路径 —— `attempt < max_retries` 带 feedback 重跑干活步骤,耗尽走 `on_unmet`。
 

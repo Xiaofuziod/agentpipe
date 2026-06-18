@@ -194,7 +194,7 @@ function ConsolePromptBar({
         <textarea
           ref={taRef}
           className="composer-input"
-          placeholder={busy ? "有运行中的 Run,结束后可再运行…" : "输入 prompt,直接运行一个 claude 任务…"}
+          placeholder={busy ? "有运行中的 Run,结束后可再运行…" : "快速单步:输入 prompt 直接跑一个 claude(不是右侧编排流程)…"}
           value={prompt}
           disabled={busy}
           rows={1}

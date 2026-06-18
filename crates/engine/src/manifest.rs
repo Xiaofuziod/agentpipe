@@ -9,7 +9,15 @@ pub struct Manifest {
     pub target: PathBuf,
     #[serde(default)]
     pub mode: RunMode,
+    /// 是否在隔离的 git worktree 中跑(不改动 target 工作区)。见 worktree-isolation spec。
+    /// 关闭时不序列化,保持现存模板 / YAML diff 干净;缺字段默认 false(向后兼容)。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub worktree: bool,
     pub steps: Vec<Step>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -259,5 +267,26 @@ mod tests {
         let y = yaml_with_verify("      by: command\n      command: \"cargo test\"\n");
         let m = Manifest::parse(&y).unwrap();
         assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn worktree_defaults_false_when_absent() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps: []\n";
+        let m = Manifest::parse(y).unwrap();
+        assert!(!m.worktree);
+    }
+
+    #[test]
+    fn worktree_parses_true() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nworktree: true\nsteps: []\n";
+        let m = Manifest::parse(y).unwrap();
+        assert!(m.worktree);
+    }
+
+    #[test]
+    fn worktree_false_not_serialized() {
+        let m = Manifest::parse("version: 1\nname: t\ntarget: /tmp\nsteps: []\n").unwrap();
+        let y = serde_yml::to_string(&m).unwrap();
+        assert!(!y.contains("worktree"), "关闭时不应序列化 worktree:\n{y}");
     }
 }

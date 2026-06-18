@@ -84,6 +84,21 @@ export function Console({
       <div className="pane-inner pane-body">
         {state ? (
           <>
+            {state.worktree && (
+              <div className="banner banner-info" title={state.worktree.path}>
+                <span>⑂</span>
+                <span>
+                  隔离 worktree:<code>{state.worktree.branch}</code>
+                  <span className="dim"> · {state.worktree.path}</span>
+                </span>
+              </div>
+            )}
+            {state.worktreeError && (
+              <div className="banner banner-error">
+                <span>✗</span>
+                <span>worktree 创建失败,Run 已终止:{state.worktreeError}</span>
+              </div>
+            )}
             <div className="console-feed">
               {state.order.map((id) => {
                 const st = state.steps[id];

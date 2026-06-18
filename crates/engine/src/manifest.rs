@@ -187,7 +187,7 @@ impl Manifest {
                         Verifier::Command => {
                             if v.command.as_deref().map(str::trim).unwrap_or("").is_empty() {
                                 return Err(EngineError::Validation(format!(
-                                    "step '{}': verify by command 需要 command 字段(shell 命令)",
+                                    "step '{}': verify by command 需要 command 字段(shell 命令),例: command: \"cargo test\"",
                                     step.id
                                 )));
                             }

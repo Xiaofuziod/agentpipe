@@ -1,4 +1,22 @@
+use agentpipe_engine::manifest::{Step, StepKind};
 use agentpipe_engine::protocol::{Event, StepStatus};
+
+/// dry-run:把一个 step 渲染成一行计划。纯函数。
+pub fn render_plan_step(step: &Step) -> String {
+    let detail = match &step.kind {
+        StepKind::Claude { verify, skill, .. } => {
+            let s = skill.as_deref().map(|s| format!(" skill={s}")).unwrap_or_default();
+            let v = verify.as_ref().map(|_| " +verify").unwrap_or_default();
+            format!("claude{s}{v}")
+        }
+        StepKind::Codex { action, .. } => format!("codex {action:?}"),
+        StepKind::Human { .. } => "human".into(),
+        StepKind::Loop { until, max, body } => {
+            format!("loop until={until} max={max} ({} 步)", body.len())
+        }
+    };
+    format!("  - {} [{detail}]", step.id)
+}
 
 /// 事件 → 人读一行。纯函数:无任何 I/O / stdin,view / dry-run / run 共用。
 pub fn render_event(event: &Event) -> String {

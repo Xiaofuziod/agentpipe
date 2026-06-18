@@ -1,6 +1,8 @@
+mod render;
+
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
-use agentpipe_engine::protocol::{Command, Event, StepStatus};
+use agentpipe_engine::protocol::{Command, Event};
 use std::io::{BufRead, Write};
 use std::sync::mpsc;
 use std::thread;
@@ -46,59 +48,14 @@ fn main() {
     });
 
     for event in erx {
-        match event {
-            Event::RunStarted { name } => println!("▶ Run: {name}"),
-            Event::StepStarted { step_id, kind } => println!("  ▷ [{kind}] {step_id}"),
-            Event::StepProgress { line, .. } => println!("    {line}"),
-            Event::StepFinished {
-                step_id,
-                status,
-                summary,
-                metrics,
-            } => {
-                let mark = if matches!(status, StepStatus::Skipped) {
-                    "⏭"
-                } else {
-                    "✓"
-                };
-                let m = metrics
-                    .map(|m| {
-                        format!(
-                            " · {} 轮 · {:.1}s · ${:.2}",
-                            m.num_turns,
-                            m.duration_ms as f64 / 1000.0,
-                            m.cost_usd
-                        )
-                    })
-                    .unwrap_or_default();
-                println!("  {mark} {step_id}: {summary}{m}");
-            }
-            Event::StepFailed { step_id, error } => println!("  ✗ {step_id}: {error}"),
-            Event::LoopIteration {
-                loop_id,
-                iteration,
-            } => println!("  ↻ {loop_id} 第 {iteration} 轮"),
-            Event::LoopConverged {
-                loop_id,
-                iterations,
-            } => println!("  ✓ {loop_id} {iterations} 轮收敛"),
-            Event::LoopMaxReached { loop_id, max } => {
-                println!("  ⚠ {loop_id} 到上限 {max} 仍未干净")
-            }
-            Event::StepAwaitingGate {
-                step_id,
-                suggestion,
-                expects_artifact,
-                ..
-            } => {
-                println!("  ⏸ {step_id}: {suggestion}");
-                let cmd = prompt_gate(&step_id, expects_artifact);
+        println!("{}", render::render_event(&event));
+        match &event {
+            Event::StepAwaitingGate { step_id, expects_artifact, .. } => {
+                let cmd = prompt_gate(step_id, *expects_artifact);
                 let _ = ctx.send(cmd);
             }
-            Event::RunFinished { status } => {
-                println!("■ 结束: {status:?}");
-                break;
-            }
+            Event::RunFinished { .. } => break,
+            _ => {}
         }
     }
 

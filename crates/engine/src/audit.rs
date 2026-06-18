@@ -17,6 +17,7 @@ fn slug(name: &str) -> String {
     let mut prev_dash = false;
     for ch in name.chars().flat_map(char::to_lowercase) {
         if ch.is_ascii_alphanumeric() {
+            // 注:_ 不是 alphanumeric → 折成 -;is_valid_run_id 另行允许 _(外部传入 id)
             out.push(ch);
             prev_dash = false;
         } else if !out.is_empty() && !prev_dash {
@@ -62,5 +63,17 @@ mod tests {
         assert!(!is_valid_run_id("a/b"));
         assert!(!is_valid_run_id(""));
         assert!(is_valid_run_id("20260618T142233Z-ok_id-1"));
+    }
+
+    #[test]
+    fn slug_retrim_after_truncation() {
+        // 39 个 'a' + '!' + 'b' → 截断前 slug "aaa…a-b"(41 字符)
+        // take(40) → "aaa…a-",再去尾 '-' → "aaa…a"(39 字符)
+        let name = "a".repeat(39) + "!b";
+        let t = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let id = run_id(&name, t);
+        assert!(!id.contains("--"), "不应有连续破折号: {id}");
+        assert!(!id.ends_with('-'), "不应以破折号结尾: {id}");
+        assert!(is_valid_run_id(&id), "应是合法 run-id: {id}");
     }
 }

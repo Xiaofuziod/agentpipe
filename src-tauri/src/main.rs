@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod bridge;
 mod commands;
+mod paths;
 mod state;
 
 fn main() {

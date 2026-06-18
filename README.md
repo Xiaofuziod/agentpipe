@@ -53,7 +53,7 @@ cargo tauri dev            # 开发启动(自动起 ui vite + tauri 窗口)
 # 或仅前端: cd ui && npm run dev
 ```
 
-功能:左侧历史记录(持久化于 ~/.agentpipe/runs/,含成本,可两两对比),中间控制台(实时执行 / 历史只读回看 / 底部 prompt 快速运行),右侧编排(可视化建 task.yaml,含 verify 校验门 codex/claude/command)。
+功能:左侧项目(Codex 式 project 概念——一个项目 = 一个 target 工作目录,该 target 下产生的多轮 run 归类到项目下,可折叠;持久化于 ~/.agentpipe/runs/,含成本,可两两对比),中间控制台(实时执行 / 历史只读回看 / 底部 prompt 快速运行,target 选择器默认最近用过的项目),右侧编排(可视化建 task.yaml,含 verify 校验门 codex/claude/command)。
 
 stub 演示同 CLI:设 `AGENTPIPE_CLAUDE_BIN` / `AGENTPIPE_CODEX_BIN` 指向 `tests/fixtures` 下的 stub 脚本。
 
@@ -61,3 +61,4 @@ stub 演示同 CLI:设 `AGENTPIPE_CLAUDE_BIN` / `AGENTPIPE_CODEX_BIN` 指向 `te
 
 - `docs/specs/2026-06-16-design.md` — 架构与协议
 - `docs/plans/2026-06-16-agentpipe-engine.md` — 实施计划
+- `docs/specs/2026-06-18-project-grouping-design.md` — 左列项目化(Codex 式 project = target)

@@ -17,6 +17,7 @@ export interface GateView {
 }
 export interface RunState {
   name: string;
+  target: string; // run 的 target(工作目录);取自 RunStarted,按项目归类用
   order: string[]; // 出现顺序
   steps: Record<string, StepView>;
   loops: Record<string, { iteration: number; result?: string }>;
@@ -31,6 +32,7 @@ const LOG_CAP = 1000;
 
 export const initialRunState = (): RunState => ({
   name: "",
+  target: "",
   order: [],
   steps: {},
   loops: {},
@@ -56,7 +58,7 @@ function setStep(prev: RunState, id: string, patch: Partial<StepView>): Pick<Run
 export function runReducer(prev: RunState, e: EngineEvent): RunState {
   switch (e.type) {
     case "RunStarted":
-      return { ...prev, name: e.name, log: pushLog(prev.log, `▶ ${e.name}`) };
+      return { ...prev, name: e.name, target: e.target ?? "", log: pushLog(prev.log, `▶ ${e.name}`) };
     case "StepProgress": {
       const patch: Partial<StepView> = { lastLine: e.line };
       if (e.round != null) patch.round = e.round;

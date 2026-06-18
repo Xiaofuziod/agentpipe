@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Composer } from "./composer/Composer";
 import { Console } from "./console/Console";
-import { RecordsPanel } from "./records/RecordsPanel";
+import { ProjectsPanel } from "./records/ProjectsPanel";
 import { DiffView } from "./records/DiffView";
 import { useRuns } from "./state/useRuns";
 import { useHistory } from "./state/useHistory";
+import { groupByProject, mostRecentTarget } from "./state/projects";
 import { ipc } from "./ipc";
 import type { Manifest, DiffRow } from "./types";
 import type { RunState } from "./state/runReducer";
@@ -84,6 +85,16 @@ export default function App() {
     }
   }, [runs.selectedId, runs.activeId]);
 
+  // 项目化:按 target 把历史 run 归类(左列 + 快跑栏下拉共用)
+  const projects = groupByProject(hist.summaries);
+
+  // 默认活跃 target = 最近用过的项目(首次有历史且尚未选 target 时)
+  useEffect(() => {
+    if (target !== null) return;
+    const recent = mostRecentTarget(projects);
+    if (recent) setTarget(recent);
+  }, [projects, target]);
+
   const pickTarget = async () => {
     const d = await ipc.pickDir();
     if (d) setTarget(d);
@@ -138,9 +149,15 @@ export default function App() {
     setDiffRows(rows);
   };
 
-  // 当前 live run(用于置顶显示)
+  // 当前 live run(用于置顶显示)。target 取自 run state(RunStarted 注入);
+  // RunStarted 到达前回退到活跃 target(quick/编排 启动时用的就是它)。
+  const liveRecord0 = runs.activeId ? runs.records.find((r) => r.id === runs.activeId) : null;
   const liveRun = runs.activeId
-    ? { id: runs.activeId, name: runs.records.find((r) => r.id === runs.activeId)?.name ?? "运行中" }
+    ? {
+        id: runs.activeId,
+        name: liveRecord0?.name ?? "运行中",
+        target: liveRecord0?.state.target || target || "",
+      }
     : null;
 
   // 去重:live 运行中时 summaries 里可能已有同一个 run_id;但 summaries 来自持久化,
@@ -162,11 +179,13 @@ export default function App() {
   return (
     <div className="app">
       <div className="workspace">
-        {/* 左:运行记录(历史 + live 置顶) */}
-        <RecordsPanel
+        {/* 左:项目(按 target 归类的 run) */}
+        <ProjectsPanel
           summaries={filteredSummaries}
           liveRun={liveRun}
+          activeTarget={target}
           selectedKey={selectedKey}
+          onSelectProject={setTarget}
           onSelectLive={handleSelectLive}
           onSelectHistory={handleSelectHistory}
           compareIds={compareIds}
@@ -181,7 +200,9 @@ export default function App() {
             isLive={isLive}
             busy={runs.activeId !== null}
             quickTarget={target}
+            knownTargets={projects.filter((p) => p.target !== "").map((p) => ({ target: p.target, name: p.name }))}
             onPickTarget={pickTarget}
+            onSelectTarget={setTarget}
             onQuickRun={quickRun}
             replayState={replayState}
           />

@@ -183,6 +183,8 @@ pub fn step_finals(entries: &[RunEntry]) -> std::collections::BTreeMap<String, S
 #[derive(Debug, Clone, serde::Serialize, PartialEq)]
 pub struct RunSummaryCore {
     pub name: String,
+    /// run 的 target(工作目录);按项目归类用。旧记录无 → 空串(前端归"未指定项目")。
+    pub target: String,
     pub status: Option<String>,
     pub total_cost_usd: f64,
     pub total_turns: u32,
@@ -192,10 +194,10 @@ pub struct RunSummaryCore {
 
 pub fn run_summary(entries: &[RunEntry]) -> RunSummaryCore {
     let cost = aggregate_cost(entries);
-    let name = entries
+    let (name, target) = entries
         .iter()
         .find_map(|e| match &e.event {
-            Event::RunStarted { name } => Some(name.clone()),
+            Event::RunStarted { name, target } => Some((name.clone(), target.clone())),
             _ => None,
         })
         .unwrap_or_default();
@@ -206,6 +208,7 @@ pub fn run_summary(entries: &[RunEntry]) -> RunSummaryCore {
     let complete = status.is_some();
     RunSummaryCore {
         name,
+        target,
         status,
         total_cost_usd: cost.total_cost_usd,
         total_turns: cost.total_turns,
@@ -272,7 +275,7 @@ mod tests {
     fn recorder_writes_ndjson_lines() {
         let dir = unique_dir("rec");
         let mut r = RunRecorder::open(&dir, "demo run").unwrap();
-        r.record(&Event::RunStarted { name: "demo run".into() });
+        r.record(&Event::RunStarted { name: "demo run".into(), target: String::new() });
         r.record(&Event::RunFinished { status: RunStatus::Success });
         let path = r.path().to_path_buf();
         drop(r);
@@ -300,7 +303,7 @@ mod tests {
 
         let dir = unique_dir("read");
         let mut r = RunRecorder::open(&dir, "x").unwrap();
-        r.record(&Event::RunStarted { name: "x".into() });
+        r.record(&Event::RunStarted { name: "x".into(), target: String::new() });
         r.record(&Event::StepFinished {
             step_id: "impl".into(),
             status: StepStatus::Done,
@@ -331,7 +334,7 @@ mod tests {
         use crate::protocol::StepStatus;
 
         let entries = vec![
-            RunEntry { ts: "".into(), event: Event::RunStarted { name: "x".into() } },
+            RunEntry { ts: "".into(), event: Event::RunStarted { name: "x".into(), target: String::new() } },
             RunEntry { ts: "".into(), event: Event::StepFinished {
                 step_id: "a".into(), status: StepStatus::Done, summary: "".into(),
                 metrics: Some(StepMetrics { num_turns: 2, duration_ms: 1000, cost_usd: 0.30 }),
@@ -359,7 +362,7 @@ mod tests {
     #[test]
     fn step_finals_extracts_status_and_cost() {
         let entries = vec![
-            RunEntry { ts: "".into(), event: Event::RunStarted { name: "x".into() } },
+            RunEntry { ts: "".into(), event: Event::RunStarted { name: "x".into(), target: String::new() } },
             RunEntry { ts: "".into(), event: ev_finished("a", 0.5) },
         ];
         let f = step_finals(&entries);
@@ -372,13 +375,14 @@ mod tests {
     fn run_summary_aggregates_name_status_cost_complete() {
         use crate::protocol::RunStatus;
         let entries = vec![
-            RunEntry { ts: "".into(), event: Event::RunStarted { name: "demo".into() } },
+            RunEntry { ts: "".into(), event: Event::RunStarted { name: "demo".into(), target: "/repo/x".into() } },
             RunEntry { ts: "".into(), event: ev_finished("a", 0.3) },
             RunEntry { ts: "".into(), event: ev_finished("b", 0.7) },
             RunEntry { ts: "".into(), event: Event::RunFinished { status: RunStatus::Success } },
         ];
         let s = run_summary(&entries);
         assert_eq!(s.name, "demo");
+        assert_eq!(s.target, "/repo/x");
         assert_eq!(s.status.as_deref(), Some("Success"));
         assert_eq!(s.step_count, 2);
         assert!(s.complete);
@@ -388,7 +392,7 @@ mod tests {
     #[test]
     fn run_summary_incomplete_when_no_runfinished() {
         let entries = vec![
-            RunEntry { ts: "".into(), event: Event::RunStarted { name: "x".into() } },
+            RunEntry { ts: "".into(), event: Event::RunStarted { name: "x".into(), target: String::new() } },
             RunEntry { ts: "".into(), event: ev_finished("a", 0.1) },
         ];
         let s = run_summary(&entries);

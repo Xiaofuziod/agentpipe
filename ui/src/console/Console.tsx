@@ -38,12 +38,20 @@ function fmtMetrics(m: { num_turns: number; duration_ms: number; cost_usd: numbe
   return `${m.num_turns} 轮 · ${secs}s${cost}`;
 }
 
+/** 快跑栏的项目下拉项 */
+export interface TargetOption {
+  target: string;
+  name: string;
+}
+
 export function Console({
   record,
   isLive,
   busy,
   quickTarget,
+  knownTargets,
   onPickTarget,
+  onSelectTarget,
   onQuickRun,
   replayState,
 }: {
@@ -51,7 +59,10 @@ export function Console({
   isLive: boolean;
   busy: boolean;
   quickTarget: string | null;
+  /** 已知项目 target(快跑栏下拉切换用) */
+  knownTargets: TargetOption[];
   onPickTarget: () => void;
+  onSelectTarget: (target: string) => void;
   onQuickRun: (prompt: string) => void;
   /** 只读回看:传入时渲染此 RunState,不显示 gate/中止按钮。 */
   replayState?: RunState;
@@ -149,7 +160,9 @@ export function Console({
       <ConsolePromptBar
         busy={busy}
         quickTarget={quickTarget}
+        knownTargets={knownTargets}
         onPickTarget={onPickTarget}
+        onSelectTarget={onSelectTarget}
         onQuickRun={onQuickRun}
       />
     </>
@@ -160,18 +173,23 @@ export function Console({
 function ConsolePromptBar({
   busy,
   quickTarget,
+  knownTargets,
   onPickTarget,
+  onSelectTarget,
   onQuickRun,
 }: {
   busy: boolean;
   quickTarget: string | null;
+  knownTargets: TargetOption[];
   onPickTarget: () => void;
+  onSelectTarget: (target: string) => void;
   onQuickRun: (prompt: string) => void;
 }) {
   const [prompt, setPrompt] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
-  const targetName = quickTarget ? quickTarget.split(/[\\/]/).pop() : null;
+  const targetName = quickTarget ? quickTarget.split(/[\\/]/).filter(Boolean).pop() : null;
   const canRun = !busy && prompt.trim().length > 0 && !!quickTarget;
 
   // 随内容自增高(上限交给 CSS max-height + 滚动)
@@ -211,10 +229,50 @@ function ConsolePromptBar({
         />
         <div className="composer-toolbar">
           <div className="composer-tools">
-            <button className="pb-target" onClick={onPickTarget} title="选择 target 仓库(claude 的工作目录)">
-              <span className="pb-target-icon">◇</span>
-              {targetName ? targetName : "选择 target"}
-            </button>
+            <div className="pb-target-wrap">
+              <button
+                className="pb-target"
+                onClick={() => setMenuOpen((v) => !v)}
+                title={quickTarget ?? "选择项目(claude 的工作目录)"}
+              >
+                <span className="pb-target-icon">◇</span>
+                {targetName ? targetName : "选择项目"}
+                <span className="pb-target-caret">▾</span>
+              </button>
+              {menuOpen && (
+                <>
+                  <div className="pb-target-backdrop" onClick={() => setMenuOpen(false)} />
+                  <div className="pb-target-menu">
+                    {knownTargets.length > 0 && (
+                      <div className="pb-target-section">最近项目</div>
+                    )}
+                    {knownTargets.map((t) => (
+                      <button
+                        key={t.target}
+                        className={`pb-target-item ${t.target === quickTarget ? "active" : ""}`}
+                        title={t.target}
+                        onClick={() => {
+                          onSelectTarget(t.target);
+                          setMenuOpen(false);
+                        }}
+                      >
+                        <span className="pb-target-item-name">{t.name}</span>
+                        <span className="pb-target-item-path">{t.target}</span>
+                      </button>
+                    ))}
+                    <button
+                      className="pb-target-item pb-target-pick"
+                      onClick={() => {
+                        setMenuOpen(false);
+                        onPickTarget();
+                      }}
+                    >
+                      ＋ 另选目录…
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
             <span className="pb-warn" title="claude 步骤一律以 bypassPermissions 运行">⚠ 自主写码</span>
           </div>
           <button className="composer-send" onClick={run} disabled={!canRun} title="运行(⌘/Ctrl+Enter)">

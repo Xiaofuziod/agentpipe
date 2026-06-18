@@ -30,7 +30,13 @@ pub struct StepMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Event {
-    RunStarted { name: String },
+    RunStarted {
+        name: String,
+        /// run 的 target(工作目录绝对路径);用于按项目归类。
+        /// 旧审计日志无此字段 → serde default 空串,容损读取不破。
+        #[serde(default)]
+        target: String,
+    },
     StepStarted { step_id: String, kind: String },
     StepProgress {
         step_id: String,

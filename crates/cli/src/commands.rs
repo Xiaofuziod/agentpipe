@@ -1,8 +1,7 @@
 //! 只读子命令(view / cost / runs / diff)。
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use agentpipe_engine::audit::{aggregate_cost, is_valid_run_id, read_run, RunEntry};
+use agentpipe_engine::audit::{aggregate_cost, is_valid_run_id, read_run, step_finals, RunEntry};
 use agentpipe_engine::protocol::Event;
 
 use crate::render::{format_metrics, render_event};
@@ -30,17 +29,6 @@ fn load_run(run_id: &str) -> Vec<RunEntry> {
     }
 }
 
-/// 按 step_id 提取每步终态(status 文本 + cost),供 diff 对比。
-fn step_finals(entries: &[RunEntry]) -> BTreeMap<String, (String, f64)> {
-    let mut m = BTreeMap::new();
-    for e in entries {
-        if let Event::StepFinished { step_id, status, metrics, .. } = &e.event {
-            let cost = metrics.as_ref().map(|x| x.cost_usd).unwrap_or(0.0);
-            m.insert(step_id.clone(), (format!("{status:?}"), cost));
-        }
-    }
-    m
-}
 
 pub fn runs() {
     let dir = runs_dir();
@@ -98,10 +86,10 @@ pub fn diff(a: &str, b: &str) {
     println!("diff {a} ↔ {b}");
     for k in keys {
         match (fa.get(k), fb.get(k)) {
-            (Some(x), None) => println!("  - {k}: 仅 A ({})", x.0),
-            (None, Some(y)) => println!("  + {k}: 仅 B ({})", y.0),
+            (Some(x), None) => println!("  - {k}: 仅 A ({})", x.status),
+            (None, Some(y)) => println!("  + {k}: 仅 B ({})", y.status),
             (Some(x), Some(y)) if x != y => {
-                println!("  ~ {k}: {} ${:.2} → {} ${:.2}", x.0, x.1, y.0, y.1);
+                println!("  ~ {k}: {} ${:.2} → {} ${:.2}", x.status, x.cost_usd, y.status, y.cost_usd);
             }
             _ => {}
         }

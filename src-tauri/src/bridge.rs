@@ -1,3 +1,4 @@
+use agentpipe_engine::audit::RunRecorder;
 use agentpipe_engine::control::Control;
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
@@ -8,6 +9,18 @@ use std::thread;
 use tauri::{AppHandle, Emitter, Manager};
 
 pub const EVENT_CHANNEL: &str = "engine://event";
+
+#[derive(Clone, serde::Serialize)]
+struct RunIdPayload {
+    run_id: String,
+}
+
+fn run_name(evt: &Event) -> &str {
+    match evt {
+        Event::RunStarted { name } => name,
+        _ => "run",
+    }
+}
 
 pub struct Started {
     pub commands: mpsc::Sender<Command>,
@@ -21,11 +34,26 @@ pub fn start(app: AppHandle, manifest: Manifest, bins: RunnerBins) -> Started {
     let control = Arc::new(Control::default());
     let engine_control = control.clone();
 
-    // 转发线程:引擎事件 → webview
+    // 转发线程:引擎事件 → webview(+ 落 NDJSON,审计旁路)
     let forward_app = app.clone();
     thread::spawn(move || {
         let mut saw_finished = false;
+        let mut recorder: Option<RunRecorder> = None;
         for evt in event_rx {
+            if matches!(evt, Event::RunStarted { .. }) {
+                recorder = RunRecorder::open(&crate::paths::runs_dir(), run_name(&evt))
+                    .map_err(|e| eprintln!("(GUI 审计未启用: {e})"))
+                    .ok();
+                if let Some(r) = &recorder {
+                    let _ = forward_app.emit(
+                        "engine://run-started-id",
+                        RunIdPayload { run_id: r.run_id().to_string() },
+                    );
+                }
+            }
+            if let Some(r) = &mut recorder {
+                r.record(&evt);
+            }
             if matches!(evt, Event::RunFinished { .. }) {
                 saw_finished = true;
             }

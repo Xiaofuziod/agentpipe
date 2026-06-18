@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ipc } from "../ipc";
 import type { StepStatus } from "../types";
 import type { RunRecord } from "../state/useRuns";
+import type { RunState } from "../state/runReducer";
 import { GatePrompt } from "./GatePrompt";
 
 const MARK: Record<StepStatus, string> = {
@@ -44,6 +45,7 @@ export function Console({
   quickTarget,
   onPickTarget,
   onQuickRun,
+  replayState,
 }: {
   record: RunRecord | null;
   isLive: boolean;
@@ -51,16 +53,21 @@ export function Console({
   quickTarget: string | null;
   onPickTarget: () => void;
   onQuickRun: (prompt: string) => void;
+  /** 只读回看:传入时渲染此 RunState,不显示 gate/中止按钮。 */
+  replayState?: RunState;
 }) {
-  const state = record?.state ?? null;
-  const live = isLive && !!state && !state.runStatus;
+  // 回看时优先用 replayState,否则取 live record 的 state
+  const state = replayState ?? record?.state ?? null;
+  // 只有无 replayState 且 isLive 且 run 未结束时才为 live(live 控制 gate/中止可见性)
+  const live = !replayState && isLive && !!state && !state.runStatus;
   const now = useNow(live);
 
   return (
     <>
       <div className="pane-header">
         <span className="ph-title">控制台</span>
-        {record && <span className="ph-count" title={record.name}>{record.name}</span>}
+        {replayState && <span className="ph-count" title={replayState.name ?? ""}>{replayState.name ?? "回看"}</span>}
+        {!replayState && record && <span className="ph-count" title={record.name}>{record.name}</span>}
         <div className="ph-spacer" />
         {live && (
           <button className="btn btn-danger btn-sm" onClick={() => ipc.sendCommand({ type: "Abort" })}>

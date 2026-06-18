@@ -1,6 +1,7 @@
-import { useState } from "react";
-import type { Step, StepKind, CodexAction } from "../types";
+import { useState, useEffect } from "react";
+import type { Step, StepKind, CodexAction, Verify } from "../types";
 import { KINDS, defaultsFor, StepRow } from "./StepCard";
+import { setVerifyEnabled, patchVerify } from "./verifyEdit";
 
 /** 单个 step 的编辑抽屉,从右侧滑入。loop 的子步骤递归用嵌套抽屉(depth+1 叠在更上层)。 */
 export function StepDrawer({
@@ -101,6 +102,7 @@ function Fields({
               onChange={(e) => onChange({ ...step, skill: e.target.value || undefined })}
             />
           </div>
+          <VerifySection step={step} onChange={onChange} />
           <div className="hint" style={{ marginTop: 4 }}>
             claude 步骤一律以 CLI 最高权限(bypassPermissions)运行,可自主写码 / 提交。
           </div>
@@ -181,6 +183,193 @@ function Fields({
     case "loop":
       return <LoopBody step={step} depth={depth} onChange={onChange} />;
   }
+}
+
+type ClaudeStep = Extract<Step, { kind: "claude" }>;
+
+function VerifySection({
+  step,
+  onChange,
+}: {
+  step: ClaudeStep;
+  onChange: (s: Step) => void;
+}) {
+  const [open, setOpen] = useState(!!step.verify);
+  useEffect(() => { setOpen(!!step.verify); }, [step.id]);
+  const v = step.verify;
+  const patch = (p: Partial<Verify>) => onChange(patchVerify(step, p));
+
+  return (
+    <div className="field" style={{ marginTop: 8 }}>
+      <label className="label" style={{ cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+        <input
+          type="checkbox"
+          checked={!!v}
+          onChange={(e) => {
+            const next = setVerifyEnabled(step, e.target.checked);
+            onChange(next);
+            setOpen(e.target.checked);
+          }}
+        />
+        校验门(verify)
+        <button
+          className="btn-icon"
+          style={{ marginLeft: "auto", fontSize: 11 }}
+          onClick={() => setOpen((o) => !o)}
+          title={open ? "折叠" : "展开"}
+        >
+          {open ? "▲" : "▼"}
+        </button>
+      </label>
+
+      {v && open && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8, paddingLeft: 12, borderLeft: "2px solid var(--border)" }}>
+          <div className="field">
+            <label className="label">by</label>
+            <select
+              className="select"
+              value={v.by}
+              onChange={(e) => {
+                const by = e.target.value as Verify["by"];
+                patch({ by, action: undefined, base: undefined, path: undefined, prompt: undefined, skill: undefined, command: undefined });
+              }}
+            >
+              <option value="codex">codex</option>
+              <option value="claude">claude</option>
+              <option value="command">command</option>
+            </select>
+          </div>
+
+          {v.by === "codex" && (
+            <>
+              <div className="field">
+                <label className="label">action</label>
+                <select
+                  className="select"
+                  value={v.action ?? "review-mr"}
+                  onChange={(e) => patch({ action: e.target.value as CodexAction })}
+                >
+                  <option value="review-mr">review-mr</option>
+                  <option value="review-doc">review-doc</option>
+                  <option value="ask">ask</option>
+                </select>
+              </div>
+              {(v.action ?? "review-mr") === "review-mr" && (
+                <div className="field">
+                  <label className="label">base 分支</label>
+                  <input
+                    className="input input-mono"
+                    placeholder="dev"
+                    value={v.base ?? ""}
+                    onChange={(e) => patch({ base: e.target.value })}
+                  />
+                </div>
+              )}
+              {(v.action ?? "review-mr") === "review-doc" && (
+                <div className="field">
+                  <label className="label">文档路径</label>
+                  <input
+                    className="input input-mono"
+                    placeholder="docs/spec.md"
+                    value={v.path ?? ""}
+                    onChange={(e) => patch({ path: e.target.value })}
+                  />
+                </div>
+              )}
+              {(v.action ?? "review-mr") === "ask" && (
+                <div className="field">
+                  <label className="label">prompt</label>
+                  <textarea
+                    className="textarea"
+                    placeholder="判定问题…"
+                    value={v.prompt ?? ""}
+                    onChange={(e) => patch({ prompt: e.target.value })}
+                  />
+                </div>
+              )}
+            </>
+          )}
+
+          {v.by === "claude" && (
+            <>
+              <div className="field">
+                <label className="label">prompt</label>
+                <textarea
+                  className="textarea"
+                  placeholder="Claude 判定指令…"
+                  value={v.prompt ?? ""}
+                  onChange={(e) => patch({ prompt: e.target.value })}
+                />
+              </div>
+              <div className="field">
+                <label className="label">
+                  skill<span className="hint">可选</span>
+                </label>
+                <input
+                  className="input input-mono"
+                  placeholder="code-review"
+                  value={v.skill ?? ""}
+                  onChange={(e) => patch({ skill: e.target.value || undefined })}
+                />
+              </div>
+            </>
+          )}
+
+          {v.by === "command" && (
+            <div className="field">
+              <label className="label">command</label>
+              <input
+                className="input input-mono"
+                placeholder="cargo test"
+                value={v.command ?? ""}
+                onChange={(e) => patch({ command: e.target.value || undefined })}
+              />
+              {!v.command && (
+                <span style={{ color: "var(--red, #e53e3e)", fontSize: 12, marginTop: 2 }}>
+                  command 不能为空
+                </span>
+              )}
+            </div>
+          )}
+
+          <div className="field">
+            <label className="label">
+              max_retries<span className="hint">默认 2</span>
+            </label>
+            <input
+              className="input"
+              type="number"
+              min={0}
+              value={v.max_retries ?? 2}
+              onChange={(e) => patch({ max_retries: Number(e.target.value) || 0 })}
+            />
+          </div>
+
+          <div className="field">
+            <label className="label">on_unmet</label>
+            <select
+              className="select"
+              value={v.on_unmet ?? "gate"}
+              onChange={(e) => patch({ on_unmet: e.target.value as Verify["on_unmet"] })}
+            >
+              <option value="gate">gate</option>
+              <option value="fail">fail</option>
+              <option value="continue">continue</option>
+            </select>
+          </div>
+
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={v.feedback ?? true}
+              onChange={(e) => patch({ feedback: e.target.checked })}
+            />
+            feedback(将校验结论反馈给 Claude)
+          </label>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function LoopBody({

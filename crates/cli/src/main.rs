@@ -42,7 +42,7 @@ enum Cmd {
 }
 
 /// ~/.agentpipe/runs(AGENTPIPE_HOME 优先)。
-fn runs_dir() -> PathBuf {
+pub(crate) fn runs_dir() -> PathBuf {
     let base = std::env::var("AGENTPIPE_HOME")
         .or_else(|_| std::env::var("HOME"))
         .unwrap_or_else(|_| ".".into());

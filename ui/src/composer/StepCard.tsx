@@ -1,4 +1,5 @@
 import type { Step, StepKind } from "../types";
+import { verifySummary } from "./verifyEdit";
 
 export const KINDS: StepKind["kind"][] = ["claude", "codex", "human", "loop"];
 
@@ -19,7 +20,8 @@ export function defaultsFor(kind: StepKind["kind"]): StepKind {
 export function stepSummary(step: Step): string {
   switch (step.kind) {
     case "claude": {
-      const tags = [step.skill && `@${step.skill}`].filter(Boolean);
+      const vSummary = verifySummary(step.verify);
+      const tags = [step.skill && `@${step.skill}`, vSummary || undefined].filter(Boolean);
       const head = step.prompt.split("\n")[0].trim();
       return [head || "(空 prompt)", tags.length ? `· ${tags.join(" ")}` : ""].join(" ");
     }

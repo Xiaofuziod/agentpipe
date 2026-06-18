@@ -17,7 +17,7 @@ struct RunIdPayload {
 
 fn run_name(evt: &Event) -> &str {
     match evt {
-        Event::RunStarted { name } => name,
+        Event::RunStarted { name, .. } => name,
         _ => "run",
     }
 }

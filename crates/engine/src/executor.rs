@@ -51,6 +51,7 @@ impl Executor {
     pub fn run(&mut self) -> RunStatus {
         let _ = self.events.send(Event::RunStarted {
             name: self.manifest.name.clone(),
+            target: self.manifest.target.display().to_string(),
         });
         // 隔离 worktree:开启则在跑任何 step 前建好,把 cwd 指向它。失败 fail-closed 终止,
         // 绝不退回 target 原地跑(否则隔离形同虚设)。

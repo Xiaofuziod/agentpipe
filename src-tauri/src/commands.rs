@@ -103,6 +103,7 @@ pub fn load_template(name: String) -> Result<Manifest, String> {
 pub struct RunSummary {
     pub run_id: String,
     pub name: String,
+    pub target: String,
     pub status: Option<String>,
     pub total_cost_usd: f64,
     pub total_turns: u32,
@@ -140,6 +141,7 @@ fn collect_runs(dir: &std::path::Path) -> Result<Vec<RunSummary>, String> {
         out.push(RunSummary {
             run_id: id,
             name: s.name,
+            target: s.target,
             status: s.status,
             total_cost_usd: s.total_cost_usd,
             total_turns: s.total_turns,
@@ -233,7 +235,7 @@ mod tests {
 
     fn write_run(dir: &std::path::Path, name: &str, cost: f64, finish: bool) -> String {
         let mut r = RunRecorder::open(dir, name).unwrap();
-        r.record(&Event::RunStarted { name: name.into() });
+        r.record(&Event::RunStarted { name: name.into(), target: "/repo/demo".into() });
         r.record(&Event::StepFinished {
             step_id: "a".into(),
             status: StepStatus::Done,

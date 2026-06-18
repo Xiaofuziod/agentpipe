@@ -32,7 +32,7 @@ export type RunStatus = "Success" | "Failed" | "Aborted";
 export type StepMetrics = { num_turns: number; duration_ms: number; cost_usd: number };
 
 export type EngineEvent =
-  | { type: "RunStarted"; name: string }
+  | { type: "RunStarted"; name: string; target?: string }
   | { type: "StepStarted"; step_id: string; kind: string }
   | { type: "StepProgress"; step_id: string; line: string; round?: number | null }
   | { type: "StepAwaitingGate"; step_id: string; suggestion: string; expects_artifact: boolean; gate_kind: GateKind }
@@ -53,6 +53,8 @@ export type EngineCommand =
 export type RunSummary = {
   run_id: string;
   name: string;
+  /** run 的 target(工作目录);按项目归类用。旧记录为空串 → 归"未指定项目"。 */
+  target: string;
   status: string | null;
   total_cost_usd: number;
   total_turns: number;

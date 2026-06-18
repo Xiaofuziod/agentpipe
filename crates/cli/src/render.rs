@@ -26,7 +26,7 @@ pub fn format_metrics(num_turns: u32, duration_ms: u64, cost_usd: f64) -> String
 /// 事件 → 人读一行。纯函数:无任何 I/O / stdin,view / dry-run / run 共用。
 pub fn render_event(event: &Event) -> String {
     match event {
-        Event::RunStarted { name } => format!("▶ Run: {name}"),
+        Event::RunStarted { name, .. } => format!("▶ Run: {name}"),
         Event::StepStarted { step_id, kind } => format!("  ▷ [{kind}] {step_id}"),
         Event::StepProgress { line, .. } => format!("    {line}"),
         Event::StepFinished { step_id, status, summary, metrics } => {

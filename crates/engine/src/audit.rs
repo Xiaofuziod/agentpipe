@@ -97,20 +97,21 @@ pub struct RunEntry {
 
 /// 读 NDJSON;跳过空行与解析失败的行(容损,不让单行坏数据废掉整次回放)。
 pub fn read_run(path: &Path) -> std::io::Result<Vec<RunEntry>> {
-    let text = fs::read_to_string(path)?;
-    let mut out = Vec::new();
-    for line in text.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let ts = v.get("ts").and_then(|t| t.as_str()).unwrap_or("").to_string();
-        if let Some(ev) = v.get("event") {
-            if let Ok(event) = serde_json::from_value::<Event>(ev.clone()) {
-                out.push(RunEntry { ts, event });
-            }
-        }
+    // 与落盘行同构的一次性解析行;ts 缺失默认空串,event 缺失/未知变体则整行解析失败。
+    #[derive(serde::Deserialize)]
+    struct Row {
+        #[serde(default)]
+        ts: String,
+        event: Event,
     }
+    let text = fs::read_to_string(path)?;
+    let out = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        // 容损:单行坏 JSON / 缺 event / 未知变体 → 跳过,不让一行废掉整次回放
+        .filter_map(|l| serde_json::from_str::<Row>(l).ok())
+        .map(|r| RunEntry { ts: r.ts, event: r.event })
+        .collect();
     Ok(out)
 }
 

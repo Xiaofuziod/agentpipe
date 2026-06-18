@@ -84,11 +84,17 @@ fn main() {
 fn cmd_run(task: &str, dry_run: bool, json: bool) {
     let manifest = load_manifest(task);
 
+    // 人读输出去向:--json 时人读走 stderr(数据走 stdout),否则人读走 stdout。
+    macro_rules! human {
+        ($($a:tt)*) => {{
+            if json { eprintln!($($a)*); } else { println!($($a)*); }
+        }};
+    }
+
     if dry_run {
-        if json { eprintln!("▶ 执行计划: {}", manifest.name); } else { println!("▶ 执行计划: {}", manifest.name); }
+        human!("▶ 执行计划: {}", manifest.name);
         for step in &manifest.steps {
-            let line = render::render_plan_step(step);
-            if json { eprintln!("{}", line); } else { println!("{}", line); }
+            human!("{}", render::render_plan_step(step));
         }
         return;
     }
@@ -108,16 +114,11 @@ fn cmd_run(task: &str, dry_run: bool, json: bool) {
 
     // RunStarted 时开 recorder;失败降级为不落盘(审计是旁路)。
     let mut recorder: Option<RunRecorder> = None;
-    // 人读输出去向:--json 时人读走 stderr,数据走 stdout。
-    macro_rules! human {
-        ($($a:tt)*) => {{
-            if json { eprintln!($($a)*); } else { println!($($a)*); }
-        }};
-    }
+    let run_dir = runs_dir();
 
     for event in erx {
         if matches!(event, Event::RunStarted { .. }) {
-            recorder = RunRecorder::open(&runs_dir(), &name)
+            recorder = RunRecorder::open(&run_dir, &name)
                 .map_err(|e| eprintln!("(审计未启用: {e})"))
                 .ok();
             if let Some(r) = &recorder {

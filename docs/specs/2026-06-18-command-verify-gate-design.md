@@ -90,23 +90,36 @@ fn verify_once(&self, v: &Verify, on_line: &mut dyn FnMut(&str, Option<u32>)) ->
                 Some(c) if !c.trim().is_empty() => c,
                 _ => return (Verdict::ChangesRequested, "verify command 缺 command 字段".into()),
             };
-            on_line(&format!("校验命令: {cmd}"), None);
-            // 返回 (exit_code, 合并输出尾部);Err = spawn/IO 失败
-            match run_verify_command(cmd, &self.ctx.cwd, self.control.as_ref()) {
-                Ok((0, _))       => (Verdict::Clean, String::new()),
-                Ok((code, tail)) => (Verdict::ChangesRequested, format!("命令退出码 {code}\n{tail}")),
-                Err(e)           => (Verdict::ChangesRequested, format!("校验执行失败: {e}")),
+            // 复用 runner::run_command:进程组 + pgid 登记(abort 可 kill)+ 行回调已就绪。
+            // sh -c "<cmd> 2>&1":把 stderr 并进 stdout,既被捕获进 findings,又经 on_line 实时流。
+            let mut fwd = |l: &str| on_line(l, None);   // run_command 的 on_line 是 FnMut(&str)
+            let shell_cmd = format!("{cmd} 2>&1");
+            match runner::run_command(
+                "sh",
+                &["-c".into(), shell_cmd],
+                &self.ctx.cwd,
+                None,                       // stdin
+                None,                       // timeout(归口独立 backlog)
+                Some(self.control.as_ref()),
+                &mut fwd,
+            ) {
+                Ok((_, true))     => (Verdict::Clean, String::new()),
+                Ok((out, false))  => (Verdict::ChangesRequested, tail(&out, 4096)),
+                Err(e)            => (Verdict::ChangesRequested, format!("校验执行失败: {e}")),
             }
         }
     }
 }
 ```
 
-`run_verify_command(cmd, cwd, control) -> Result<(i32, String)>`:
+复用要点:
 
-- `Command::new("sh").arg("-c").arg(cmd).current_dir(cwd)`,stdout+stderr 合并捕获,返回 `(exit_code, 输出尾部 ≤4KB)`。被信号杀死(无 exit code)按 `Err` 处理 → fail-closed。
-- **可中断性**:与现有 runner 一致 —— spawn 前查 `control.is_aborted()`;spawn 后把子进程 pgid 注册到 `control.set_current(...)`,使 abort 能 `control.kill_current()` 杀掉长命令(`cargo test` 这类不会卡死整个 run)。`claude.run` / `codex.review` 现在正是这么做的(都收 `Some(self.control.as_ref())`),command 不得偷懒只查 flag。
+- **不新写 spawn 逻辑**。`runner::run_command(bin, args, cwd, stdin, timeout, control, on_line)` 已返回 `(stdout: String, success: bool)`,且内部已做:独立进程组 + `control.set_current` 登记 pgid + spawn 后补查 abort + 行回调。command verifier 只是它的一个调用点。
+- **判据**:`success`(= 子进程 `status.success()`,即 exit 0)→ `Clean`;否则 → `ChangesRequested`,findings = 输出尾部(`tail(out, 4096)`,≤4KB);spawn/IO 失败 → `Err` → `ChangesRequested`(fail-closed)。被信号杀死时 `run_command` 返回 `success=false`,同样判未达成。
+- **可中断**:传 `Some(self.control.as_ref())` 即获得与 `claude.run`/`codex.review` 完全一致的 abort-kill 能力(`cargo test` 这类长命令可被宿主 Abort 杀掉整组)。
+- **stderr**:`2>&1` 合并进 stdout 后,既进 findings 又经 `on_line` 实时显示;无需扩 `run_command`(它现在 stderr 是 inherit,不捕获)。
 - 错误文案沿用现有 verify_once 的"校验执行失败"(executor.rs:307/325),不另造一套。
+- `tail(s, n)`:取字符串末 n 字节(按 char 边界对齐),executor 内小工具函数。
 
 下游不变:返回 `Verdict::ChangesRequested` 即触发现有 `Unmet` 路径 —— `attempt < max_retries` 带 feedback 重跑干活步骤,耗尽走 `on_unmet`。
 

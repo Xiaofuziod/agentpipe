@@ -84,6 +84,9 @@ pub struct Verify {
     /// claude verifier 的 skill(可选)。
     #[serde(default)]
     pub skill: Option<String>,
+    /// command verifier 的 shell 命令(仅 by: command 用);exit 0 = 达成。
+    #[serde(default)]
+    pub command: Option<String>,
     /// 未达成时重跑干活步骤的次数上限(0 = 纯质量门,不重试)。
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
@@ -100,6 +103,8 @@ pub enum Verifier {
     Codex,
     /// claude 只读判定(`--permission-mode plan`),回复末行 `VERDICT: pass|fail`。
     Claude,
+    /// shell 命令判定:exit 0 = 达成,否则未达成。findings = 输出尾部。
+    Command,
 }
 
 /// 重试耗尽后的升级策略。默认 gate:最保守,交人决策。
@@ -179,6 +184,14 @@ impl Manifest {
                                 )));
                             }
                         }
+                        Verifier::Command => {
+                            if v.command.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                                return Err(EngineError::Validation(format!(
+                                    "step '{}': verify by command 需要 command 字段(shell 命令)",
+                                    step.id
+                                )));
+                            }
+                        }
                     }
                     if v.max_retries > MAX_VERIFY_RETRIES {
                         return Err(EngineError::Validation(format!(
@@ -220,5 +233,31 @@ impl Manifest {
             }
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn yaml_with_verify(verify_block: &str) -> String {
+        format!(
+            "version: 1\nname: t\ntarget: /tmp\nmode: auto\nsteps:\n  - id: impl\n    kind: claude\n    prompt: \"do\"\n    verify:\n{verify_block}"
+        )
+    }
+
+    #[test]
+    fn command_verify_requires_command() {
+        let y = yaml_with_verify("      by: command\n");
+        let m = Manifest::parse(&y).unwrap();
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("command"), "err = {err}");
+    }
+
+    #[test]
+    fn command_verify_ok_with_command() {
+        let y = yaml_with_verify("      by: command\n      command: \"cargo test\"\n");
+        let m = Manifest::parse(&y).unwrap();
+        assert!(m.validate().is_ok());
     }
 }

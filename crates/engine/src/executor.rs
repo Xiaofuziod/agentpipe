@@ -325,6 +325,10 @@ impl Executor {
                     Err(e) => (Verdict::ChangesRequested, format!("校验执行失败: {e}")),
                 }
             }
+            Verifier::Command => {
+                // Task 2: command verifier runtime wiring (not in scope for Task 1)
+                (Verdict::ChangesRequested, "command verifier not yet implemented".into())
+            }
         }
     }
 

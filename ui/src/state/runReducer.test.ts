@@ -26,6 +26,16 @@ describe("runReducer", () => {
     expect(s.activeGate).toBeNull();
   });
 
+  it("captures worktree ready and failure", () => {
+    let s = initialRunState();
+    s = runReducer(s, { type: "WorktreeReady", path: "/tmp/wt/repo-1", branch: "agentpipe/x-1" });
+    expect(s.worktree).toEqual({ path: "/tmp/wt/repo-1", branch: "agentpipe/x-1" });
+
+    let f = initialRunState();
+    f = runReducer(f, { type: "WorktreeFailed", error: "不是 git 仓库" });
+    expect(f.worktreeError).toBe("不是 git 仓库");
+  });
+
   it("records loop convergence and run terminal status", () => {
     let s = initialRunState();
     s = runReducer(s, { type: "LoopConverged", loop_id: "l", iterations: 2 });

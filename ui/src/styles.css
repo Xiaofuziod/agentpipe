@@ -807,6 +807,17 @@ body {
   border: 1px solid var(--accent-dim);
   color: var(--accent);
 }
+.banner-info {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-dim);
+  color: var(--text-muted);
+  margin-top: 0;
+  margin-bottom: var(--sp-sm);
+}
+.banner-info code {
+  color: var(--accent);
+  font-size: 12px;
+}
 
 /* ---------- 控制台 ---------- */
 .console-feed {

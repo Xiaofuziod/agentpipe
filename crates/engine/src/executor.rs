@@ -542,6 +542,15 @@ mod tests {
     }
 
     #[test]
+    fn command_verdict_spawn_failure_fail_closed() {
+        let ctrl = Control::default();
+        // 不存在的 cwd → spawn 失败 → run_command 返回 Err → 走 "校验执行失败" 分支
+        let (v, f) = command_verdict("echo hi", Path::new("/nonexistent/agentpipe/xyz"), &ctrl, &mut |_l| {});
+        assert!(matches!(v, Verdict::ChangesRequested));
+        assert!(f.contains("校验执行失败"), "Err 分支文案不对: {f}");
+    }
+
+    #[test]
     fn tail_keeps_suffix_on_char_boundary() {
         assert_eq!(tail("hello", 100), "hello");
         assert_eq!(tail("abcdefgh", 3), "fgh");

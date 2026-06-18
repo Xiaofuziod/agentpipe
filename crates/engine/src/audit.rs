@@ -224,6 +224,16 @@ mod tests {
         let entries = read_run(&path).unwrap();
         assert_eq!(entries.len(), 2);
         assert!(matches!(entries[0].event, Event::RunStarted { .. }));
+        match &entries[1].event {
+            Event::StepFinished { step_id, status: StepStatus::Done, summary, metrics: Some(m) } => {
+                assert_eq!(step_id, "impl");
+                assert_eq!(summary, "ok");
+                assert_eq!(m.num_turns, 3);
+                assert_eq!(m.duration_ms, 1000);
+                assert!((m.cost_usd - 0.5).abs() < 1e-9);
+            }
+            other => panic!("entries[1] 应是带 metrics 的 StepFinished,实际: {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

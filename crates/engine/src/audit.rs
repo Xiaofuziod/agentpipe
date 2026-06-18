@@ -102,7 +102,7 @@ impl RunRecorder {
 }
 
 /// 一条审计记录:落盘时刻 + 反序列化出的事件。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RunEntry {
     pub ts: String,
     pub event: Event,
@@ -139,7 +139,7 @@ pub fn read_run(path: &Path) -> std::io::Result<Vec<RunEntry>> {
 }
 
 /// 一次 run 的成本/耗时聚合。
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, serde::Serialize)]
 pub struct CostSummary {
     pub steps: Vec<(String, StepMetrics)>,
     pub total_cost_usd: f64,
@@ -158,6 +158,60 @@ pub fn aggregate_cost(entries: &[RunEntry]) -> CostSummary {
         }
     }
     s
+}
+
+/// 一步的终态(status 文本 + cost),供 diff 对比。
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct StepFinal {
+    pub status: String,
+    pub cost_usd: f64,
+}
+
+/// 按 step_id 提取每步终态。供 CLI diff 与 GUI diff_runs 共用(单一来源)。
+pub fn step_finals(entries: &[RunEntry]) -> std::collections::BTreeMap<String, StepFinal> {
+    let mut m = std::collections::BTreeMap::new();
+    for e in entries {
+        if let Event::StepFinished { step_id, status, metrics, .. } = &e.event {
+            let cost_usd = metrics.as_ref().map(|x| x.cost_usd).unwrap_or(0.0);
+            m.insert(step_id.clone(), StepFinal { status: format!("{status:?}"), cost_usd });
+        }
+    }
+    m
+}
+
+/// 一次 run 的摘要(列表/卡片用)。name 取首个 RunStarted;status/complete 取末 RunFinished。
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct RunSummaryCore {
+    pub name: String,
+    pub status: Option<String>,
+    pub total_cost_usd: f64,
+    pub total_turns: u32,
+    pub step_count: usize,
+    pub complete: bool,
+}
+
+pub fn run_summary(entries: &[RunEntry]) -> RunSummaryCore {
+    let cost = aggregate_cost(entries);
+    let name = entries
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::RunStarted { name } => Some(name.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let status = entries.iter().rev().find_map(|e| match &e.event {
+        Event::RunFinished { status } => Some(format!("{status:?}")),
+        _ => None,
+    });
+    let complete = status.is_some();
+    RunSummaryCore {
+        name,
+        status,
+        total_cost_usd: cost.total_cost_usd,
+        total_turns: cost.total_turns,
+        step_count: cost.steps.len(),
+        complete,
+    }
 }
 
 #[cfg(test)]
@@ -292,5 +346,53 @@ mod tests {
         assert_eq!(s.total_turns, 7);
         assert_eq!(s.total_duration_ms, 3000);
         assert!((s.total_cost_usd - 1.0).abs() < 1e-9);
+    }
+
+    fn ev_finished(id: &str, cost: f64) -> Event {
+        use crate::protocol::StepStatus;
+        Event::StepFinished {
+            step_id: id.into(), status: StepStatus::Done, summary: "".into(),
+            metrics: Some(StepMetrics { num_turns: 1, duration_ms: 1000, cost_usd: cost }),
+        }
+    }
+
+    #[test]
+    fn step_finals_extracts_status_and_cost() {
+        let entries = vec![
+            RunEntry { ts: "".into(), event: Event::RunStarted { name: "x".into() } },
+            RunEntry { ts: "".into(), event: ev_finished("a", 0.5) },
+        ];
+        let f = step_finals(&entries);
+        assert_eq!(f.len(), 1);
+        assert_eq!(f["a"].status, "Done");
+        assert!((f["a"].cost_usd - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn run_summary_aggregates_name_status_cost_complete() {
+        use crate::protocol::RunStatus;
+        let entries = vec![
+            RunEntry { ts: "".into(), event: Event::RunStarted { name: "demo".into() } },
+            RunEntry { ts: "".into(), event: ev_finished("a", 0.3) },
+            RunEntry { ts: "".into(), event: ev_finished("b", 0.7) },
+            RunEntry { ts: "".into(), event: Event::RunFinished { status: RunStatus::Success } },
+        ];
+        let s = run_summary(&entries);
+        assert_eq!(s.name, "demo");
+        assert_eq!(s.status.as_deref(), Some("Success"));
+        assert_eq!(s.step_count, 2);
+        assert!(s.complete);
+        assert!((s.total_cost_usd - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn run_summary_incomplete_when_no_runfinished() {
+        let entries = vec![
+            RunEntry { ts: "".into(), event: Event::RunStarted { name: "x".into() } },
+            RunEntry { ts: "".into(), event: ev_finished("a", 0.1) },
+        ];
+        let s = run_summary(&entries);
+        assert!(!s.complete);
+        assert_eq!(s.status, None);
     }
 }

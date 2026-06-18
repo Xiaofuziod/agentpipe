@@ -45,6 +45,17 @@ STUB_VERDICT=clean \
 
 - `templates/full-pipeline.yaml` — 完整 9 步全自动流程(brainstorm → Claude 审 → Codex 审 → 出执行文档 → 写码建 MR → code-review + simplify → Codex 审 MR 循环到干净 → 存记忆)
 
+## GUI(Tauri 桌面端)
+
+```bash
+cargo tauri dev            # 开发启动(自动起 ui vite + tauri 窗口)
+# 或仅前端: cd ui && npm run dev
+```
+
+功能:左侧历史记录(持久化于 ~/.agentpipe/runs/,含成本,可两两对比),中间控制台(实时执行 / 历史只读回看 / 底部 prompt 快速运行),右侧编排(可视化建 task.yaml,含 verify 校验门 codex/claude/command)。
+
+stub 演示同 CLI:设 `AGENTPIPE_CLAUDE_BIN` / `AGENTPIPE_CODEX_BIN` 指向 `tests/fixtures` 下的 stub 脚本。
+
 ## 设计文档
 
 - `docs/specs/2026-06-16-design.md` — 架构与协议

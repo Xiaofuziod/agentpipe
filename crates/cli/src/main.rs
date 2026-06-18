@@ -1,28 +1,60 @@
 mod render;
 
+use agentpipe_engine::audit::{event_json_line, RunRecorder};
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
 use agentpipe_engine::protocol::{Command, Event};
+use clap::{Parser, Subcommand};
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
-fn main() {
-    let mut args = std::env::args().skip(1);
-    let sub = args.next();
-    let path = match (sub.as_deref(), args.next()) {
-        (Some("run"), Some(p)) => p,
-        _ => {
-            eprintln!("用法: agentpipe run <task.yaml>");
-            std::process::exit(2);
-        }
-    };
+#[derive(Parser)]
+#[command(name = "agentpipe", about = "本地研发流程编排引擎")]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
 
-    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+#[derive(Subcommand)]
+enum Cmd {
+    /// 执行 task.yaml
+    Run {
+        task: String,
+        /// 只解析 + 校验 + 打印执行计划,不起任何 CLI 子进程
+        #[arg(long)]
+        dry_run: bool,
+        /// 事件以 NDJSON 写 stdout,人读日志写 stderr
+        #[arg(long)]
+        json: bool,
+    },
+    /// 仅解析 + 校验 task.yaml
+    Validate { task: String },
+    /// 列出历史 run
+    Runs,
+    /// 重读某次 run 的事件
+    View { run_id: String },
+    /// 某次 run 的成本拆解
+    Cost { run_id: String },
+    /// 对比两次 run
+    Diff { run_a: String, run_b: String },
+}
+
+/// ~/.agentpipe/runs(AGENTPIPE_HOME 优先)。
+fn runs_dir() -> PathBuf {
+    let base = std::env::var("AGENTPIPE_HOME")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".into());
+    PathBuf::from(base).join(".agentpipe").join("runs")
+}
+
+fn load_manifest(path: &str) -> Manifest {
+    let yaml = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("读取 {path} 失败: {e}");
         std::process::exit(1);
     });
-    let manifest = match Manifest::parse(&yaml).and_then(|m| {
+    match Manifest::parse(&yaml).and_then(|m| {
         m.validate()?;
         Ok(m)
     }) {
@@ -31,24 +63,74 @@ fn main() {
             eprintln!("manifest 错误: {e}");
             std::process::exit(1);
         }
-    };
+    }
+}
+
+fn main() {
+    let cli = Cli::parse();
+    match cli.cmd {
+        Cmd::Run { task, dry_run, json } => cmd_run(&task, dry_run, json),
+        Cmd::Validate { task } => {
+            load_manifest(&task);
+            println!("✓ {task} 校验通过");
+        }
+        Cmd::Runs => commands::runs(),
+        Cmd::View { run_id } => commands::view(&run_id),
+        Cmd::Cost { run_id } => commands::cost(&run_id),
+        Cmd::Diff { run_a, run_b } => commands::diff(&run_a, &run_b),
+    }
+}
+
+fn cmd_run(task: &str, dry_run: bool, json: bool) {
+    let manifest = load_manifest(task);
+
+    if dry_run {
+        println!("▶ 执行计划: {}", manifest.name);
+        for step in &manifest.steps {
+            println!("{}", render::render_plan_step(step));
+        }
+        return;
+    }
 
     let bins = RunnerBins {
         claude: std::env::var("AGENTPIPE_CLAUDE_BIN").unwrap_or_else(|_| "claude".into()),
         codex: std::env::var("AGENTPIPE_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
     };
-
     let (etx, erx) = mpsc::channel::<Event>();
     let (ctx, crx) = mpsc::channel::<Command>();
-
+    let name = manifest.name.clone();
     let control = std::sync::Arc::new(agentpipe_engine::control::Control::default());
     let handle = thread::spawn(move || {
         let mut ex = Executor::new(manifest, bins, control, etx, crx);
         ex.run()
     });
 
+    // RunStarted 时开 recorder;失败降级为不落盘(审计是旁路)。
+    let mut recorder: Option<RunRecorder> = None;
+    // 人读输出去向:--json 时人读走 stderr,数据走 stdout。
+    macro_rules! human {
+        ($($a:tt)*) => {{
+            if json { eprintln!($($a)*); } else { println!($($a)*); }
+        }};
+    }
+
     for event in erx {
-        println!("{}", render::render_event(&event));
+        if matches!(event, Event::RunStarted { .. }) {
+            recorder = RunRecorder::open(&runs_dir(), &name)
+                .map_err(|e| eprintln!("(审计未启用: {e})"))
+                .ok();
+            if let Some(r) = &recorder {
+                human!("(审计: {})", r.path().display());
+            }
+        }
+        if let Some(r) = &mut recorder {
+            r.record(&event);
+        }
+        if json {
+            println!("{}", event_json_line(&event));
+        }
+        human!("{}", render::render_event(&event));
+
         match &event {
             Event::StepAwaitingGate { step_id, expects_artifact, .. } => {
                 let cmd = prompt_gate(step_id, *expects_artifact);
@@ -58,9 +140,10 @@ fn main() {
             _ => {}
         }
     }
-
     let _ = handle.join();
 }
+
+mod commands;
 
 fn prompt_gate(step_id: &str, expects_artifact: bool) -> Command {
     let hint = if expects_artifact {

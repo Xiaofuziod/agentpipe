@@ -150,6 +150,17 @@ steps:
     assert!(events
         .iter()
         .any(|e| matches!(e, Event::LoopMaxReached { max: 2, .. })));
+    // loop 自身不发 StepStarted(否则宿主把它渲染成永久 "运行中" 的幽灵步骤);
+    // 只有 body 子步骤(rev)发。
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::StepStarted { step_id, .. } if step_id == "fixloop")),
+        "loop 步不应发 StepStarted"
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::StepStarted { step_id, kind } if step_id == "rev" && kind == "codex")));
 }
 
 /// 跑一个带 verify 的单 claude step,返回收到的事件流。

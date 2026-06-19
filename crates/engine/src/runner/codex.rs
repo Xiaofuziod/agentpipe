@@ -13,7 +13,9 @@ static OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 /// codex review 单次墙钟上限(秒)。挂死 / provider 失联时到点 kill 整组,
 /// review() 返回 Err 走 step 失败决策门,绝不冻住整个 run。可经
 /// `AGENTPIPE_CODEX_TIMEOUT_SECS` 覆盖(>0 生效)。
-const DEFAULT_CODEX_TIMEOUT_SECS: u64 = 300;
+/// 默认 1200s(20min):大 MR review 读大 diff + 推理本就慢,留足空间;
+/// 仍远低于无超时时观测到的 6.5h 冻死。
+const DEFAULT_CODEX_TIMEOUT_SECS: u64 = 1200;
 
 pub struct CodexRunner {
     bin: String,

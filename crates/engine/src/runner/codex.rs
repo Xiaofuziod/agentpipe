@@ -10,8 +10,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// codex review 单次墙钟上限(秒)。挂死 / provider 失联时到点 kill 整组,
+/// review() 返回 Err 走 step 失败决策门,绝不冻住整个 run。可经
+/// `AGENTPIPE_CODEX_TIMEOUT_SECS` 覆盖(>0 生效)。
+const DEFAULT_CODEX_TIMEOUT_SECS: u64 = 300;
+
 pub struct CodexRunner {
     bin: String,
+    timeout_secs: u64,
 }
 
 #[derive(Deserialize)]
@@ -35,7 +41,17 @@ struct RawFinding {
 
 impl CodexRunner {
     pub fn new(bin: String) -> Self {
-        Self { bin }
+        let timeout_secs = std::env::var("AGENTPIPE_CODEX_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_CODEX_TIMEOUT_SECS);
+        Self { bin, timeout_secs }
+    }
+
+    /// 显式指定超时(秒),供测试注入小值;生产走 `new` 的默认 / env。
+    pub fn with_timeout(bin: String, timeout_secs: u64) -> Self {
+        Self { bin, timeout_secs }
     }
 
     /// 返回 ReviewResult。解析失败一律 fail-closed 为 ChangesRequested。
@@ -56,8 +72,9 @@ impl CodexRunner {
         let out_str = out_file.to_string_lossy().to_string();
         let schema = write_schema()?;
 
-        // 全部走通用 `codex exec`:实测 `codex exec review` 子命令的 -o 写的是散文,
-        // 不认 --output-schema;只有通用 exec + 严格 schema 才把 -o 写成结构化 JSON。
+        // 全部走通用 `codex exec` + 严格 --output-schema 拿结构化 verdict。
+        // 注:实测 codex v0.139.0 把最终结构化结果打到 stdout、并不写 -o(--output-last-message)
+        // 文件,故下方以 stdout 为主、-o 为 fallback(`codex exec review` 子命令的 -o 写散文,弃用)。
         // review-doc 把文档内容经 stdin 喂给 codex(spec 7.2);其余 action 无 stdin。
         let (args, stdin): (Vec<String>, Option<String>) = match action {
             CodexAction::ReviewMr => {
@@ -110,9 +127,58 @@ impl CodexRunner {
 
         // codex exec 输出非 NDJSON 协议,原始行直接作无轮次进度上报(round=None)。
         let mut raw_sink = |line: &str| on_progress(line, None);
-        run_command(&self.bin, &args, cwd, stdin.as_deref(), None, control, &mut raw_sink)?;
-        Ok(parse_review(&out_file))
+        let started = std::time::Instant::now();
+        let (stdout, success) = run_command(
+            &self.bin,
+            &args,
+            cwd,
+            stdin.as_deref(),
+            Some(self.timeout_secs),
+            control,
+            &mut raw_sink,
+        )?;
+        // 超时:run_command 到点 killpg 返回 success=false,用墙钟区分超时与普通非零退出。
+        // fail-closed 为 Err → executor 走 step 失败决策门(重试/跳过/中止),不把超时喂回 loop 重挂。
+        if !success && started.elapsed() >= std::time::Duration::from_secs(self.timeout_secs) {
+            return Err(EngineError::Cli(format!(
+                "Codex 审查超时(>{}s),已中止",
+                self.timeout_secs
+            )));
+        }
+        // 真实 codex(v0.139.0)把最终结构化结果打到 stdout、不写 -o(--output-last-message)文件。
+        // 故 stdout 优先:取最后一条能解析成 schema 的 JSON 行;读 -o 文件作 fallback
+        // (stub / 旧 codex 路径,parse_review 自带"无法解析"兜底)。
+        Ok(parse_review_stdout(&stdout).unwrap_or_else(|| parse_review(&out_file)))
     }
+}
+
+/// RawReview → ReviewResult(verdict 归一 + findings 扁平化)。解析两路共用,避免漂移。
+fn raw_to_result(raw: RawReview) -> ReviewResult {
+    let verdict = if raw.verdict == "clean" {
+        Verdict::Clean
+    } else {
+        Verdict::ChangesRequested
+    };
+    let findings = raw
+        .findings
+        .iter()
+        .map(|f| format!("[{}] {}:{} {}", f.severity, f.file, f.line, f.summary))
+        .collect::<Vec<_>>()
+        .join("\n");
+    ReviewResult { verdict, findings }
+}
+
+/// 从 codex stdout 抓最后一条能解析成 schema 的 JSON 行。无则 None(交给 -o fallback)。
+fn parse_review_stdout(stdout: &str) -> Option<ReviewResult> {
+    for line in stdout.lines().rev() {
+        let t = line.trim();
+        if t.starts_with('{') {
+            if let Ok(raw) = serde_json::from_str::<RawReview>(t) {
+                return Some(raw_to_result(raw));
+            }
+        }
+    }
+    None
 }
 
 fn write_schema() -> Result<String, EngineError> {
@@ -136,22 +202,10 @@ fn parse_review(out_file: &Path) -> ReviewResult {
         Ok(c) => c,
         Err(_) => return fallback,
     };
-    let raw: RawReview = match serde_json::from_str(content.trim()) {
-        Ok(r) => r,
-        Err(_) => return fallback,
-    };
-    let verdict = if raw.verdict == "clean" {
-        Verdict::Clean
-    } else {
-        Verdict::ChangesRequested
-    };
-    let findings = raw
-        .findings
-        .iter()
-        .map(|f| format!("[{}] {}:{} {}", f.severity, f.file, f.line, f.summary))
-        .collect::<Vec<_>>()
-        .join("\n");
-    ReviewResult { verdict, findings }
+    match serde_json::from_str::<RawReview>(content.trim()) {
+        Ok(raw) => raw_to_result(raw),
+        Err(_) => fallback,
+    }
 }
 
 // 必须是严格 JSON Schema:OpenAI 结构化输出要求每个 object 带 additionalProperties:false

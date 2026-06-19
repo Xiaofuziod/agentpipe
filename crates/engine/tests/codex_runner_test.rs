@@ -37,6 +37,33 @@ fn parses_clean() {
 }
 
 #[test]
+fn parses_verdict_from_stdout_when_no_output_file() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // 真实 codex(v0.139.0)把最终结构化 JSON 打到 stdout、不写 -o 文件:
+    // 引擎必须能从 stdout 解析出 verdict,而不是因 -o 缺失 fail-closed 成 changes_requested。
+    std::env::set_var("STUB_VERDICT", "clean");
+    let r = CodexRunner::new(fixture("stub-codex-stdout.sh"))
+        .review(&CodexAction::ReviewMr, None, Some("dev"), None, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
+        .expect("review ok");
+    assert_eq!(r.verdict, Verdict::Clean);
+}
+
+#[test]
+fn review_times_out_and_errors() {
+    // 挂死的 codex(睡 30s)+ 1s 超时 → 应在 ~1s 内超时返回 Err,不冻住整个 run。
+    let r = CodexRunner::with_timeout(fixture("stub-codex-hang.sh"), 1).review(
+        &CodexAction::ReviewMr,
+        None,
+        Some("dev"),
+        None,
+        None,
+        &mut |_: &str, _: Option<u32>| {},
+        &PathBuf::from("."),
+    );
+    assert!(r.is_err(), "超时应返回 Err,实际: {:?}", r.map(|x| x.verdict));
+}
+
+#[test]
 fn unparseable_output_is_changes_requested() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // 注入会产出非法 JSON 的 verdict,校验 fail-closed

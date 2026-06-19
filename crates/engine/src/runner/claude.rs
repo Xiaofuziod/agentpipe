@@ -5,8 +5,14 @@ use crate::protocol::StepMetrics;
 use serde_json::Value;
 use std::path::Path;
 
+/// claude 单步墙钟上限(秒)。比 codex review 宽得多——实现步骤合法可跑十几分钟;
+/// 仅作挂死 / provider 失联的兜底,到点 killpg 整组、run() 返回 Err 走 step 失败决策门。
+/// 可经 `AGENTPIPE_CLAUDE_TIMEOUT_SECS` 覆盖(>0 生效)。
+const DEFAULT_CLAUDE_TIMEOUT_SECS: u64 = 1800;
+
 pub struct ClaudeRunner {
     bin: String,
+    timeout_secs: u64,
 }
 
 pub struct ClaudeOutcome {
@@ -20,14 +26,24 @@ pub struct ClaudeOutcome {
 
 impl ClaudeRunner {
     pub fn new(bin: String) -> Self {
-        Self { bin }
+        let timeout_secs = std::env::var("AGENTPIPE_CLAUDE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_CLAUDE_TIMEOUT_SECS);
+        Self { bin, timeout_secs }
+    }
+
+    /// 显式指定超时(秒),供测试注入小值;生产走 `new` 的默认 / env。
+    pub fn with_timeout(bin: String, timeout_secs: u64) -> Self {
+        Self { bin, timeout_secs }
     }
 
     /// 干活步骤(`read_only=false`)以 bypassPermissions 跑:headless 下唯有它能让 claude
     /// 自主 edit + bash(提交/建 MR 需要),acceptEdits 只放行编辑、挡 bash。
     /// 校验步骤(`read_only=true`)以 `--permission-mode plan` 跑:只读探查、不改仓库,
     /// 用于 claude-as-verifier 判定(fail-closed 安全:verifier 不应改动 target)。
-    /// 见 docs/specs/cli-behavior-findings.md。不暴露超时旋钮,挂死靠控制台 Interrupt 兜底。
+    /// 见 docs/specs/cli-behavior-findings.md。墙钟超时(默认 1800s)兜底挂死,另有控制台 Interrupt。
     ///
     /// 用 `--output-format stream-json --verbose` 拿逐行 NDJSON:每个 `assistant` 行 = 一轮
     /// 模型请求(经 `on_progress(label, Some(round))` 上报),终态 `result` 行带轮次/耗时/成本
@@ -57,6 +73,7 @@ impl ClaudeRunner {
         ];
 
         let mut parser = StreamParser::new();
+        let started = std::time::Instant::now();
         // 用块限定 raw_sink 的借用,使其在 run_command 返回后立即释放 parser/on_progress。
         let (stdout, success) = {
             let mut raw_sink = |raw: &str| {
@@ -64,9 +81,17 @@ impl ClaudeRunner {
                     on_progress(&turn.label, Some(turn.round));
                 }
             };
-            run_command(&self.bin, &args, cwd, None, None, control, &mut raw_sink)?
+            run_command(&self.bin, &args, cwd, None, Some(self.timeout_secs), control, &mut raw_sink)?
         };
         if !success {
+            // 超时:run_command 到点 killpg 返回 success=false,用墙钟区分超时与普通非零退出。
+            // 两路都 fail-closed 为 Err → executor 走 step 失败决策门,挂死不会冻住整个 run。
+            if started.elapsed() >= std::time::Duration::from_secs(self.timeout_secs) {
+                return Err(EngineError::Cli(format!(
+                    "claude 步骤超时(>{}s),已中止",
+                    self.timeout_secs
+                )));
+            }
             return Err(EngineError::Cli("claude 非零退出".into()));
         }
         Ok(ClaudeOutcome {

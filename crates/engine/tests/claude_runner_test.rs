@@ -39,6 +39,21 @@ fn reports_round_per_assistant_turn() {
 }
 
 #[test]
+fn run_times_out_and_errors() {
+    // 挂死的 claude(睡 30s)+ 1s 超时 → 应在 ~1s 内超时返回 Err,不冻住整个 run。
+    let r = ClaudeRunner::with_timeout(fixture("stub-claude-hang.sh"), 1);
+    let out = r.run(
+        "实现功能",
+        None,
+        None,
+        &mut |_: &str, _: Option<u32>| {},
+        &PathBuf::from("."),
+        false,
+    );
+    assert!(out.is_err(), "超时应返回 Err");
+}
+
+#[test]
 fn skill_prefixes_prompt() {
     let r = ClaudeRunner::new(fixture("stub-claude.sh"));
     let out = r

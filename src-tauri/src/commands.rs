@@ -3,7 +3,8 @@ use crate::state::{ActiveRun, AppState};
 use agentpipe_engine::executor::RunnerBins;
 use agentpipe_engine::manifest::Manifest;
 use agentpipe_engine::protocol::Command;
-use tauri::{AppHandle, State};
+use tauri::path::BaseDirectory;
+use tauri::{AppHandle, Manager, State};
 use agentpipe_engine::audit::{self, RunEntry};
 use agentpipe_engine::protocol::Event;
 
@@ -14,7 +15,14 @@ fn runner_bins() -> RunnerBins {
     }
 }
 
-fn templates_dir() -> std::path::PathBuf {
+/// 模板目录:安装后读打进 bundle 的资源(自包含,与 tauri.conf.json > bundle > resources
+/// 同一相对路径语法);dev 模式或资源缺失时兜底回源码仓 templates/。
+fn templates_dir(app: &AppHandle) -> std::path::PathBuf {
+    if let Ok(p) = app.path().resolve("../templates", BaseDirectory::Resource) {
+        if p.is_dir() {
+            return p;
+        }
+    }
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../templates")
 }
 
@@ -36,8 +44,11 @@ fn launch(app: AppHandle, state: &State<AppState>, manifest: Manifest) -> Result
 
 #[tauri::command]
 pub fn start_run(app: AppHandle, state: State<AppState>, path: String) -> Result<(), String> {
+    // 与 save_manifest 用同一解析器,保证"存到哪就跑哪"(~ 展开 / 裸名落 tasks_dir)
+    let resolved = crate::paths::resolve_task_path(&path);
     // 读/解析在锁外做,不持 AppState 锁跨阻塞 I/O(避免阻塞 send_command / 清理)
-    let yaml = std::fs::read_to_string(&path).map_err(|e| format!("读取 {path} 失败: {e}"))?;
+    let yaml = std::fs::read_to_string(&resolved)
+        .map_err(|e| format!("读取 {} 失败: {e}", resolved.display()))?;
     let manifest = Manifest::parse(&yaml).map_err(|e| e.to_string())?;
     launch(app, &state, manifest)
 }
@@ -67,13 +78,20 @@ pub fn send_command(state: State<AppState>, cmd: Command) -> Result<(), String> 
 pub fn save_manifest(manifest: Manifest, path: String) -> Result<(), String> {
     manifest.validate().map_err(|e| e.to_string())?;
     let yaml = serde_yml::to_string(&manifest).map_err(|e| e.to_string())?;
-    std::fs::write(&path, yaml).map_err(|e| e.to_string())?;
+    // 安装后 GUI 进程 cwd=/(只读),裸名 / 相对路径会写到只读根 → EROFS。
+    // 统一经 resolve_task_path 落到可写的 ~/.agentpipe/tasks/(或用户给的绝对路径)。
+    let resolved = crate::paths::resolve_task_path(&path);
+    if let Some(parent) = resolved.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建目录 {} 失败: {e}", parent.display()))?;
+    }
+    std::fs::write(&resolved, yaml).map_err(|e| format!("写入 {} 失败: {e}", resolved.display()))?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn list_templates() -> Result<Vec<String>, String> {
-    let dir = templates_dir();
+pub fn list_templates(app: AppHandle) -> Result<Vec<String>, String> {
+    let dir = templates_dir(&app);
     let mut names = vec![];
     for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
         let p = entry.map_err(|e| e.to_string())?.path();
@@ -88,11 +106,11 @@ pub fn list_templates() -> Result<Vec<String>, String> {
 
 /// 解析模板 YAML 返回 Manifest(webview 无 YAML 解析器,复用 Rust serde)。
 #[tauri::command]
-pub fn load_template(name: String) -> Result<Manifest, String> {
+pub fn load_template(app: AppHandle, name: String) -> Result<Manifest, String> {
     if name.contains('/') || name.contains("..") {
         return Err("非法模板名".into());
     }
-    let p = templates_dir().join(format!("{name}.yaml"));
+    let p = templates_dir(&app).join(format!("{name}.yaml"));
     let yaml = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
     Manifest::parse(&yaml).map_err(|e| e.to_string())
 }

@@ -164,7 +164,7 @@ export function Composer({
           <div className="row" style={{ flexWrap: "nowrap" }}>
             <input
               className="input input-mono"
-              placeholder="~/tasks/my-task.yaml"
+              placeholder="my-task(默认存到 ~/.agentpipe/tasks/)或绝对路径 ~/tasks/x.yaml"
               value={savePath}
               onChange={(e) => setSavePath(e.target.value)}
             />

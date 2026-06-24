@@ -2,9 +2,14 @@
 mod bridge;
 mod commands;
 mod paths;
+mod shellpath;
 mod state;
 
 fn main() {
+    // Finder/Dock 启动的 .app 拿不到终端 PATH → 修回真实 PATH,否则 spawn claude/codex ENOENT。
+    // 必须在启动引擎(spawn 子进程)前做;放 main 最前,所有后续 spawn 都继承修好的 env。
+    shellpath::repair_path_from_login_shell();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state::AppState::default())

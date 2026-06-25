@@ -1,22 +1,35 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Manifest, Step } from "../types";
 import { ipc } from "../ipc";
 import { StepRow } from "./StepCard";
 import { StepDrawer } from "./StepDrawer";
 
 const emptyStep = (id: string): Step => ({ id, kind: "claude", prompt: "" });
-const emptyManifest = (): Manifest => ({ version: 1, name: "", target: "", mode: "step", worktree: false, steps: [] });
+// GUI 一律 auto(逐步批准模式已下线,引擎仍兼容 step YAML)。
+const emptyManifest = (): Manifest => ({ version: 1, name: "", target: "", mode: "auto", worktree: false, steps: [] });
+
+/** 顶层带 expects 的 human 步骤 = 启动任务的「必要条件」,启动表单逐条预填。 */
+function humanInputs(steps: Step[]): Array<{ id: string; instruction: string; expects: string }> {
+  return steps.flatMap((s) =>
+    s.kind === "human" && s.expects
+      ? [{ id: s.id, instruction: s.instruction, expects: s.expects }]
+      : [],
+  );
+}
 
 export function Composer({
   target,
-  onRun,
+  onLaunch,
 }: {
   target: string | null;
-  onRun: (path: string) => void;
+  /** 启动任务:把内联 manifest(已注入 target / 预置条件)交给宿主 inline 跑。 */
+  onLaunch: (manifest: Manifest) => void;
 }) {
   const [m, setM] = useState<Manifest>(emptyManifest);
   const [savePath, setSavePath] = useState("");
   const [templates, setTemplates] = useState<string[]>([]);
+  // 启动条件值:human 步骤 id → 用户填的值(仅用于本次启动,不写进模版)
+  const [launchValues, setLaunchValues] = useState<Record<string, string>>({});
   const [err, setErr] = useState<string | null>(null);
   const [ok, setOk] = useState<string | null>(null);
   const [editing, setEditing] = useState<number | null>(null);
@@ -46,70 +59,73 @@ export function Composer({
   const loadTemplate = async (name: string) => {
     if (!name) return;
     try {
-      setM(await ipc.loadTemplate(name));
+      const loaded = await ipc.loadTemplate(name);
+      setM({ ...loaded, mode: "auto" }); // GUI 不暴露模式,一律 auto
+      setLaunchValues({}); // 换模板,旧条件作废
       setErr(null);
+      setOk(null);
     } catch (e) {
       setErr(String(e));
     }
   };
 
-  // 全应用单一 target(在控制台下方选择)注入 manifest 后再落盘
-  const persist = async (): Promise<boolean> => {
+  // 必要条件(随步骤变)
+  const inputs = useMemo(() => humanInputs(m.steps), [m.steps]);
+
+  // 保存模版:当前编辑(注入 target、恒 auto)落盘,不含本次启动填的条件。
+  const save = async () => {
     setErr(null);
     setOk(null);
     if (!savePath) {
-      setErr("请填保存路径");
-      return false;
+      setErr("请填模版保存路径");
+      return;
     }
     if (!target) {
       setErr("请先在控制台下方选择 target 仓库");
-      return false;
+      return;
     }
     try {
-      await ipc.saveManifest({ ...m, target }, savePath);
-      return true;
+      await ipc.saveManifest({ ...m, mode: "auto", target }, savePath);
+      setOk("已保存模版");
     } catch (e) {
       setErr(String(e));
-      return false;
     }
   };
 
-  const save = async () => {
-    if (await persist()) setOk("已保存");
-  };
-
-  // 运行 = 先按当前编辑 + target 落盘,再跑该文件,保证跑的就是屏幕上的内容
-  const run = async () => {
-    if (await persist()) onRun(savePath);
+  // 启动任务:把必要条件注入对应 human 步骤的 value,inline 跑(无需先存盘)。
+  const launch = () => {
+    setErr(null);
+    setOk(null);
+    if (m.steps.length === 0) {
+      setErr("还没有步骤,先编排或从模板新建");
+      return;
+    }
+    if (!target) {
+      setErr("请先在控制台下方选择 target 仓库");
+      return;
+    }
+    const steps = m.steps.map((s) =>
+      s.kind === "human" && s.expects && launchValues[s.id]?.trim()
+        ? { ...s, value: launchValues[s.id].trim() }
+        : s,
+    );
+    onLaunch({ ...m, mode: "auto", target, steps, name: m.name || "编排任务" });
   };
 
   return (
     <div className="pane-body">
       {/* 任务级设置 */}
       <div className="card">
-        <div className="row" style={{ flexWrap: "nowrap" }}>
-          <div className="field" style={{ flex: 1, minWidth: 0 }}>
-            <label className="label">模式</label>
-            <select
-              className="select"
-              value={m.mode}
-              onChange={(e) => update({ mode: e.target.value as Manifest["mode"] })}
-            >
-              <option value="step">step(逐步批准)</option>
-              <option value="auto">auto(自动跑)</option>
-            </select>
-          </div>
-          <div className="field" style={{ flex: 1, minWidth: 0 }}>
-            <label className="label">从模板新建</label>
-            <select className="select" defaultValue="" onChange={(e) => loadTemplate(e.target.value)}>
-              <option value="">选择模板…</option>
-              {templates.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="field">
+          <label className="label">从模板新建</label>
+          <select className="select" value="" onChange={(e) => loadTemplate(e.target.value)}>
+            <option value="">选择模板…</option>
+            {templates.map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
         </div>
         <label className="checkbox" style={{ marginTop: 12 }} title="在 target 仓库的一个新 git worktree(新分支)里跑,不改动当前工作区;跑完保留供 review/合并">
           <input
@@ -119,11 +135,11 @@ export function Composer({
           />
           在隔离 git worktree 中运行(不改动 target 工作区)
         </label>
-        {m.mode === "auto" && hasClaude(m.steps) && (
+        {hasClaude(m.steps) && (
           <div className="banner banner-warn">
             <span>⚠</span>
             <span>
-              auto 模式:claude 步骤将以 bypassPermissions 在 target 仓库完全自主写码,确认 target 可信。
+              claude 步骤将以 bypassPermissions 在 target 仓库完全自主写码,确认 target 可信。
             </span>
           </div>
         )}
@@ -157,10 +173,13 @@ export function Composer({
         </button>
       </div>
 
-      {/* 保存 / 运行 */}
+      {/* 保存为模版(纯编排产出,可复用) */}
       <div className="card" style={{ marginTop: 24 }}>
         <div className="field">
-          <label className="label">保存到 task.yaml</label>
+          <label className="label">
+            保存为模版
+            <span className="hint">存成可复用的 task.yaml,不含本次启动填的条件</span>
+          </label>
           <div className="row" style={{ flexWrap: "nowrap" }}>
             <input
               className="input input-mono"
@@ -168,17 +187,53 @@ export function Composer({
               value={savePath}
               onChange={(e) => setSavePath(e.target.value)}
             />
-            <button className="btn" onClick={save}>
-              保存
-            </button>
-            <button className="btn btn-primary" onClick={run} disabled={!savePath}>
-              ▷ 运行
+            <button className="btn" onClick={save} disabled={!savePath}>
+              保存模版
             </button>
           </div>
         </div>
-        {err && <div className="banner banner-error">{err}</div>}
-        {ok && <div className="banner banner-ok">{ok}</div>}
       </div>
+
+      {/* 启动任务(填必要条件直接跑,无需先存盘) */}
+      <div className="card" style={{ marginTop: 12 }}>
+        <label className="label">
+          启动任务
+          <span className="hint">填好必要条件直接运行,无需先保存</span>
+        </label>
+        {inputs.length > 0 ? (
+          <div style={{ marginTop: 4 }}>
+            {inputs.map((it) => (
+              <div className="field" key={it.id} style={{ marginTop: 10 }}>
+                <label className="label" style={{ fontWeight: 500 }} title={it.instruction}>
+                  {it.id}
+                  <span className="hint">{it.expects}</span>
+                </label>
+                <input
+                  className="input"
+                  placeholder={it.instruction}
+                  value={launchValues[it.id] ?? ""}
+                  onChange={(e) => setLaunchValues((v) => ({ ...v, [it.id]: e.target.value }))}
+                />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-muted)" }}>
+            该任务无需预填条件,直接运行即可。
+          </div>
+        )}
+        <button
+          className="btn btn-primary"
+          style={{ marginTop: 14 }}
+          onClick={launch}
+          disabled={m.steps.length === 0}
+        >
+          ▷ 运行
+        </button>
+      </div>
+
+      {err && <div className="banner banner-error" style={{ marginTop: 12 }}>{err}</div>}
+      {ok && <div className="banner banner-ok" style={{ marginTop: 12 }}>{ok}</div>}
 
       {editing !== null && m.steps[editing] && (
         <StepDrawer

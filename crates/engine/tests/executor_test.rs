@@ -378,3 +378,80 @@ steps:
         .iter()
         .any(|e| matches!(e, Event::StepAwaitingGate { step_id, .. } if step_id == "rev")));
 }
+
+#[test]
+fn human_with_preset_value_skips_gate_and_seeds_artifact() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // human 步骤预置 value → 不发 gate、不阻塞;下游步骤可用 {{mr.artifact}} 拿到该值。
+    // 无指令送入 commands(crx 空),若仍 gate 会卡死 recv;能跑完即证明跳过了 gate。
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: mr
+    kind: human
+    instruction: "粘贴链接"
+    expects: "链接"
+    value: "https://example.com/mr/1"
+  - id: echo
+    kind: human
+    instruction: "记录 {{mr.artifact}}"
+    value: "seen {{mr.artifact}}"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_ctx_tx, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+
+    assert_eq!(status, RunStatus::Success);
+    let events: Vec<_> = erx.try_iter().collect();
+    // 预置值的 human 步骤不应发出任何 gate
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::StepAwaitingGate { .. })),
+        "预置值的 human 步骤不应发 gate"
+    );
+    // 两个 human 步骤都 Done
+    let done = events
+        .iter()
+        .filter(|e| matches!(e, Event::StepFinished { status: StepStatus::Done, .. }))
+        .count();
+    assert_eq!(done, 2);
+}
+
+#[test]
+fn human_with_blank_preset_falls_back_to_gate() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // value 插值后为空(引用了不存在的 step)→ 回退到正常 gate,而非静默跳过。
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: mr
+    kind: human
+    instruction: "粘贴链接"
+    expects: "链接"
+    value: "{{missing.artifact}}"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx_tx, crx) = mpsc::channel();
+    // 预放批准,gate 到达即被消费(否则 recv 卡死)
+    ctx_tx
+        .send(Command::ApproveGate {
+            step_id: "mr".into(),
+            artifact: Some("manual".into()),
+        })
+        .unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    ex.run();
+    let events: Vec<_> = erx.try_iter().collect();
+    assert!(
+        events.iter().any(|e| matches!(e, Event::StepAwaitingGate { step_id, .. } if step_id == "mr")),
+        "空预置值应回退到人工 gate"
+    );
+}

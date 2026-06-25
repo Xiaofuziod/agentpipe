@@ -130,6 +130,16 @@ export default function App() {
     setSelection({ kind: "history", runId, state });
   };
 
+  // 删除一条历史 run:落盘文件删掉 → 刷新列表;清理选中态 / 对比态。
+  const handleDeleteRun = async (runId: string) => {
+    await ipc.deleteRun(runId);
+    hist.refresh();
+    setCompareIds((prev) => prev.filter((id) => id !== runId));
+    setSelection((prev) =>
+      prev?.kind === "history" && prev.runId === runId ? null : prev,
+    );
+  };
+
   // 对比 checkbox 切换
   const handleToggleCompare = (runId: string) => {
     setCompareIds((prev) => {
@@ -189,6 +199,7 @@ export default function App() {
           onSelectProject={setTarget}
           onSelectLive={handleSelectLive}
           onSelectHistory={handleSelectHistory}
+          onDeleteRun={handleDeleteRun}
           compareIds={compareIds}
           onToggleCompare={handleToggleCompare}
           onCompare={handleCompare}
@@ -218,7 +229,7 @@ export default function App() {
             </button>
           </div>
           <div className="pane-inner">
-            <Composer target={target} onRun={(p) => { runs.start(p); setSelection({ kind: "live" }); }} />
+            <Composer target={target} onLaunch={(man) => { runs.startInline(man); setSelection({ kind: "live" }); }} />
           </div>
         </div>
 

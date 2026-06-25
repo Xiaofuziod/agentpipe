@@ -1,65 +1,135 @@
 # AgentPipe
 
-个人用的本地编排客户端:把一个研发任务从设计到合入的流程(brainstorm → 双重 review → 实现 → 代码闸门循环)编排成声明式配置,引擎解析后串行执行,把 Claude / Codex 当本地 CLI 黑盒调用。
+**A cross-vendor adversarial review pipeline for AI coding CLIs — with deterministic command gates.**
 
-当前为 Phase 1a:headless 引擎 + 命令行驱动。GUI(Tauri 壳)留作 Phase 1b。
+One model *writes*, a **different** model *reviews*, and the loop repeats until the reviewer is clean. AgentPipe declares that flow as a small YAML manifest, runs your existing `claude` and `codex` CLIs as black boxes, and gates progress on real exit codes — not vibes.
 
-## 构建
+> 中文说明见 [README.zh-CN.md](README.zh-CN.md)
 
-```bash
-cargo build
-cargo test
-```
+![AgentPipe running the cross-vendor review loop](demo/agentpipe.gif)
 
-## 用法
+> **Status: alpha / personal tool, made public as-is.** Built for one person's workflow (Claude Code + Codex, macOS-first). It is small (~8.6k LOC), tested (100+ tests), and the engine is cross-platform-aware, but it has not been hardened for general use. Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-```bash
-agentpipe run <task.yaml>
-```
+## Why this exists (and how it's different)
 
-`task.yaml` 见 `templates/`。可用环境变量覆盖 CLI 二进制(便于用 stub 测试):
+The 2026 multi-agent landscape is mostly **parallel swarms and kanban boards**: run N agents at once, review the diffs by hand. AgentPipe is the other shape — a **serial, declarative quality pipeline** with three opinions:
 
-- `AGENTPIPE_CLAUDE_BIN` — 默认 `claude`
-- `AGENTPIPE_CODEX_BIN` — 默认 `codex`
+- **Cross-vendor adversarial review.** The author and the reviewer are different vendors on purpose (Claude writes, Codex reviews). Different models have different blind spots, so the reviewer catches what the author can't see in its own work — then the author fixes and the reviewer re-checks, looping until clean.
+- **Deterministic command gates.** A verify gate can be `by: command` — your own test/build/lint command, where **exit code 0 = goal met**. No LLM judging whether the tests "probably pass." Run the tests.
+- **Fail-closed convergence.** A parse failure, a missing verdict, or hitting the loop's `max` does **not** silently pass. It stops and asks a human. The conservative branch is always the default.
 
-stub 端到端示例:
+If you want a parallel agent swarm, use [Vibe Kanban](https://github.com/BloopAI/vibe-kanban) or Conductor. If you want *"Codex keeps tearing apart Claude's work until it's actually clean, gated on my test suite"*, that's this.
+
+## Quickstart
 
 ```bash
-mkdir -p /tmp/demo-repo
-AGENTPIPE_CLAUDE_BIN=$PWD/tests/fixtures/stub-claude.sh \
-AGENTPIPE_CODEX_BIN=$PWD/tests/fixtures/stub-codex.sh \
-STUB_VERDICT=clean \
-./target/debug/agentpipe run tests/fixtures/sample-task.yaml
+cargo build --release        # builds the `agentpipe` CLI
+cargo test                   # ~100 tests
 ```
 
-## Step 类型
-
-| kind | 说明 |
-|---|---|
-| claude | 让 Claude 一次性完成一个指令(可引用 skill);一律以 CLI 最高权限(bypassPermissions)跑 |
-| codex | Codex 审文档(review-doc)/ 审仓库改动(review-mr)/ 问一句(ask) |
-| human | 人去做(通常在自己的 Claude Code 会话),引擎等批准与产物 |
-| loop | 包一段子步骤,until: codex-clean 收敛或到 max 上限退出 |
-
-## 模板
-
-- `templates/full-pipeline.yaml` — 完整 9 步全自动流程(brainstorm → Claude 审 → Codex 审 → 出执行文档 → 写码建 MR → code-review + simplify → Codex 审 MR 循环到干净 → 存记忆)
-- `templates/mr-review-loop.yaml` — 输入 MR 链接 → Codex 审 MR → Claude 按反馈修复并 push → 再审,循环直到 Codex 判定干净(`base` 改成该 MR 的目标分支)
-
-## GUI(Tauri 桌面端)
+Try the full flow with **no API calls** using the bundled stub binaries — this is exactly what the GIF above records:
 
 ```bash
-cargo tauri dev            # 开发启动(自动起 ui vite + tauri 窗口)
-# 或仅前端: cd ui && npm run dev
+mkdir -p /tmp/ap-demo/repo && (cd /tmp/ap-demo/repo && git init -q)
+AGENTPIPE_CLAUDE_BIN=$PWD/demo/stub-claude.sh \
+AGENTPIPE_CODEX_BIN=$PWD/demo/stub-codex.sh \
+AGENTPIPE_HOME=/tmp/ap-demo \
+./target/release/agentpipe run demo/demo-task.yaml
 ```
 
-功能:左侧项目(Codex 式 project 概念——一个项目 = 一个 target 工作目录,该 target 下产生的多轮 run 归类到项目下,可折叠;持久化于 ~/.agentpipe/runs/,含成本,可两两对比),中间控制台(实时执行 / 历史只读回看 / 底部 prompt 快速运行,target 选择器默认最近用过的项目),右侧编排(可视化建 task.yaml,含 verify 校验门 codex/claude/command)。
+For real runs, have the `claude` and `codex` CLIs on your `PATH` (or point `AGENTPIPE_CLAUDE_BIN` / `AGENTPIPE_CODEX_BIN` at them) and:
 
-stub 演示同 CLI:设 `AGENTPIPE_CLAUDE_BIN` / `AGENTPIPE_CODEX_BIN` 指向 `tests/fixtures` 下的 stub 脚本。
+```bash
+agentpipe run task.yaml            # run a pipeline
+agentpipe run task.yaml --dry-run  # parse + validate + print the plan, spawn nothing
+agentpipe validate task.yaml       # parse + validate only
+agentpipe runs                     # list past runs
+agentpipe view  <run-id>           # replay a run's events
+agentpipe cost  <run-id>           # per-step cost / turns / duration
+agentpipe diff  <run-a> <run-b>    # diff two runs
+```
 
-## 设计文档
+## The killer pattern: an MR review-fix loop
 
-- `docs/specs/2026-06-16-design.md` — 架构与协议
-- `docs/plans/2026-06-16-agentpipe-engine.md` — 实施计划
-- `docs/specs/2026-06-18-project-grouping-design.md` — 左列项目化(Codex 式 project = target)
-- `docs/specs/2026-06-18-step-output-expand-design.md` — 控制台单步输出可展开/折叠(实时输出)
+[`templates/mr-review-loop.yaml`](templates/mr-review-loop.yaml) is the flow in the GIF: paste an MR/PR link, Claude checks out the branch, then Codex reviews the diff and Claude fixes the findings — **looping until Codex reports clean** (or stopping for a human at `max`).
+
+```yaml
+version: 1
+name: "MR review-fix loop"
+target: /abs/path/to/repo
+mode: auto
+steps:
+  - id: mr
+    kind: human
+    instruction: "Paste the MR/PR link"
+    expects: "MR link"
+  - id: checkout
+    kind: claude
+    prompt: "Check out the branch for {{mr.artifact}} ..."
+  - id: review-fix
+    kind: loop
+    until: codex-clean       # converge when Codex's verdict is `clean`
+    max: 10                  # hit the ceiling -> pause for a human, never pass silently
+    body:
+      - id: review
+        kind: codex
+        action: review-mr
+        base: main
+      - id: fix
+        kind: claude
+        prompt: "Fix Codex's findings on {{mr.artifact}} and push.\n\n{{review.findings}}"
+```
+
+Data flows between steps by explicit interpolation — `{{mr.artifact}}`, `{{review.findings}}`, `{{review.verdict}}`.
+
+## Step types
+
+| kind   | what it does |
+|--------|--------------|
+| claude | Run Claude once on a prompt (optionally referencing a skill). Runs at the CLI's highest permission (bypassPermissions). |
+| codex  | Codex as a reviewer: `review-doc` / `review-mr` (structured `verdict` + `findings`) / `ask`. |
+| human  | A human does something (often in their own Claude Code session); the engine waits for approval + an artifact. Can be pre-seeded with `value` to run headless. |
+| loop   | Wrap a body of sub-steps; `until: codex-clean` converges, or stop at `max`. |
+
+Any `claude` / `codex` step can carry a **verify gate** (`verify: { by: codex | claude | command, ... }`) that re-checks whether the step met its goal and retries with feedback if not.
+
+## Desktop GUI (Tauri)
+
+```bash
+cargo tauri dev      # auto-starts the Vite UI + a Tauri window
+```
+
+Three panes: **projects** (runs grouped by target repo, persisted under `~/.agentpipe/runs/` with cost, pairwise diff), **console** (live execution / read-only replay / a quick-run prompt bar), and **composer** (build a `task.yaml` visually, save it as a template, or fill in the launch conditions and run). The same stub binaries drive the GUI demo.
+
+> Note: the GUI's labels are currently Chinese; the CLI is English. English GUI strings are a known gap.
+
+## Persistence & audit
+
+Every run is appended as NDJSON to `~/.agentpipe/runs/<run-id>.ndjson` (run-id is allowlisted to `[A-Za-z0-9_-]` to prevent path traversal). That's the basis for `view` / `cost` / `diff` and the GUI's read-only replay.
+
+## Platform support
+
+| Platform | CLI engine | Desktop GUI |
+|----------|-----------|-------------|
+| macOS    | primary, tested | primary, tested |
+| Linux    | should work (unix paths; same code paths as macOS) | should work (untested) |
+| Windows  | compiles (unix-only `libc`/process-group code is `cfg`-gated, with fallbacks); untested | Tauri is cross-platform; untested |
+
+CI builds and tests on Linux + macOS and build-checks Windows. Reports of breakage on Linux/Windows are welcome.
+
+## Adapting to other agents
+
+AgentPipe wires to `claude` and `codex` today. The injection points, in order of effort:
+
+- **Swap the binaries** (no code): `AGENTPIPE_CLAUDE_BIN` / `AGENTPIPE_CODEX_BIN` point the runners at any compatible executable (this is how the stub demo works).
+- **Add a new agent runner**: `crates/engine/src/runner/` holds `claude.rs` / `codex.rs` behind `RunnerBins`; add a sibling and a `StepKind` variant in `crates/engine/src/manifest.rs`. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+A general plugin/provider abstraction is intentionally **not** built yet (YAGNI for a two-vendor tool).
+
+## Design docs
+
+The repo carries its specs and plans — see [`docs/specs/`](docs/specs/) and [`docs/plans/`](docs/plans/). [`docs/research/`](docs/research/) compares AgentPipe to ccswarm and Conductor.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

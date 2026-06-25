@@ -28,7 +28,7 @@ steps:
       - id: review
         kind: codex
         action: review-mr
-        base: dev           # ← 改成该 MR 的目标分支(main / dev / master …)
+        base: dev           # ← 改成该 MR 的目标分支(main / dev / master …);ref 不存在引擎会直接报错暂停,不再空转
 
       # 3 / 5. 把 Codex 找到的问题交给 Claude 修复并提交回该 MR 分支
       - id: fix

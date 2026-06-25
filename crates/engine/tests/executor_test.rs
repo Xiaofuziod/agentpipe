@@ -35,7 +35,7 @@ steps:
   - id: rev
     kind: codex
     action: review-mr
-    base: dev
+    base: HEAD
   - id: fix
     kind: claude
     prompt: "用 {{rev.findings}}"
@@ -72,7 +72,7 @@ steps:
   - id: rev
     kind: codex
     action: review-mr
-    base: dev
+    base: HEAD
 "#;
     let m = Manifest::parse(yaml).unwrap();
     let (etx, erx) = mpsc::channel();
@@ -105,7 +105,7 @@ steps:
       - id: rev
         kind: codex
         action: review-mr
-        base: dev
+        base: HEAD
       - id: fix
         kind: claude
         prompt: "修 {{rev.findings}}"
@@ -139,7 +139,7 @@ steps:
       - id: rev
         kind: codex
         action: review-mr
-        base: dev
+        base: HEAD
 "#;
     let m = Manifest::parse(yaml).unwrap();
     let (etx, erx) = mpsc::channel();
@@ -161,6 +161,55 @@ steps:
     assert!(events
         .iter()
         .any(|e| matches!(e, Event::StepStarted { step_id, kind } if step_id == "rev" && kind == "codex")));
+}
+
+#[test]
+fn loop_base_ref_missing_fails_loud_without_spinning_to_max() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("STUB_VERDICT", "changes_requested");
+    // 活锁的对偶面回归:base ref 不存在时,review-mr 必须 fail-loud 走失败决策门,
+    // 而不是把 changes_requested 喂回 loop 空转到 max(已观测:9 轮烧 $16)。
+    // 预置 Abort 消费第一次决策门 → 断言只跑了 1 轮 review、未到 max。
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 5
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: agentpipe-nonexistent-base-ref
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx_tx, crx) = mpsc::channel();
+    ctx_tx.send(Command::Abort).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    ex.run();
+    let events: Vec<_> = erx.try_iter().collect();
+    // fail-loud:发了 StepFailed
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::StepFailed { step_id, .. } if step_id == "rev")),
+        "base 缺失应发 StepFailed(fail-loud)"
+    );
+    // 不空转:review 只 Started 1 次,绝不跑满 max
+    let rev_starts = events
+        .iter()
+        .filter(|e| matches!(e, Event::StepStarted { step_id, .. } if step_id == "rev"))
+        .count();
+    assert_eq!(rev_starts, 1, "base 缺失应首轮即 fail-loud,不空转");
+    assert!(
+        !events.iter().any(|e| matches!(e, Event::LoopMaxReached { .. })),
+        "fail-loud 不应跑到 max"
+    );
 }
 
 /// 跑一个带 verify 的单 claude step,返回收到的事件流。
@@ -198,7 +247,7 @@ fn count_progress(events: &[Event], needle: &str) -> usize {
 #[test]
 fn verify_clean_passes_without_retry() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let events = run_verify_step("clean", "      by: codex\n      action: review-mr\n      base: dev");
+    let events = run_verify_step("clean", "      by: codex\n      action: review-mr\n      base: HEAD");
     assert_eq!(count_progress(&events, "校验未通过"), 0);
     assert!(events.iter().any(|e| matches!(
         e,
@@ -214,7 +263,7 @@ fn verify_unmet_retries_to_max_then_fails() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let events = run_verify_step(
         "changes_requested",
-        "      by: codex\n      action: review-mr\n      base: dev\n      max_retries: 2\n      on_unmet: fail",
+        "      by: codex\n      action: review-mr\n      base: HEAD\n      max_retries: 2\n      on_unmet: fail",
     );
     // 重试 2 次 → 2 条"校验未通过"
     assert_eq!(count_progress(&events, "校验未通过"), 2);
@@ -229,7 +278,7 @@ fn verify_unmet_continue_proceeds() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let events = run_verify_step(
         "changes_requested",
-        "      by: codex\n      action: review-mr\n      base: dev\n      max_retries: 1\n      on_unmet: continue",
+        "      by: codex\n      action: review-mr\n      base: HEAD\n      max_retries: 1\n      on_unmet: continue",
     );
     assert!(events.iter().any(|e| matches!(
         e,
@@ -257,7 +306,7 @@ steps:
     verify:
       by: codex
       action: review-mr
-      base: dev
+      base: HEAD
       max_retries: 0
       on_unmet: gate
 "#;
@@ -359,7 +408,7 @@ steps:
   - id: rev
     kind: codex
     action: review-mr
-    base: dev
+    base: HEAD
 "#;
     let m = Manifest::parse(yaml).unwrap();
     let (etx, erx) = mpsc::channel();

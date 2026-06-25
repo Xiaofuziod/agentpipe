@@ -33,7 +33,7 @@ steps:
       - id: codex-review-mr
         kind: codex
         action: review-mr
-        base: dev
+        base: dev           # ← 改成该 MR 的目标分支(main / dev / master …);ref 不存在引擎会直接报错暂停
       - id: apply-feedback
         kind: claude
         prompt: "按 Codex 反馈修改并提交:{{codex-review-mr.findings}}"

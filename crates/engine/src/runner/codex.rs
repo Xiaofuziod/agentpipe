@@ -81,6 +81,18 @@ impl CodexRunner {
         let (args, stdin): (Vec<String>, Option<String>) = match action {
             CodexAction::ReviewMr => {
                 let b = base.unwrap_or("dev");
+                // base ref 预检:review-mr 审的是 `git diff {b}...HEAD`。若 {b} 在目标仓库
+                // 不可解析(分支名配错 / 仓库未 fetch 到该分支),codex 跑 diff 必然失败,
+                // 只能把"没法审"返回成 changes_requested。引擎若信任该 verdict 喂回 loop,
+                // until:codex-clean 永不满足 → loop 空转烧钱到 max(活锁,已观测)。
+                // 这里 fail-loud 返回 Err → executor 走 step 失败决策门(暂停/中止),不静默放过。
+                if !base_ref_resolvable(cwd, b) {
+                    return Err(EngineError::Cli(format!(
+                        "审查基线 ref `{b}` 在目标仓库无法解析(`git diff {b}...HEAD` 会报 unknown revision)。\
+                         请确认 task 的 review.base 是该 MR 的真实目标分支(如 main/master),\
+                         且目标仓库已 fetch 到该分支。"
+                    )));
+                }
                 (
                     vec![
                         "exec".into(),
@@ -152,6 +164,22 @@ impl CodexRunner {
         // (stub / 旧 codex 路径,parse_review 自带"无法解析"兜底)。
         Ok(parse_review_stdout(&stdout).unwrap_or_else(|| parse_review(&out_file)))
     }
+}
+
+/// base ref 能否在 cwd 仓库解析为 commit。与 codex 实际跑的 `git diff {base}...HEAD`
+/// 同一套 gitrevisions 规则(裸 ref,不做 `origin/` DWIM);`^{commit}` 确保解析到 commit-ish。
+/// git 不可用 / 非 git 仓库 / ref 不存在一律返回 false → 调用方 fail-loud(绝不静默放过)。
+fn base_ref_resolvable(cwd: &Path, base: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("{base}^{{commit}}"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 /// RawReview → ReviewResult(verdict 归一 + findings 扁平化)。解析两路共用,避免漂移。

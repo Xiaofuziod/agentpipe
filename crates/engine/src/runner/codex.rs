@@ -43,11 +43,10 @@ struct RawFinding {
 
 impl CodexRunner {
     pub fn new(bin: String) -> Self {
-        let timeout_secs = std::env::var("AGENTPIPE_CODEX_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_CODEX_TIMEOUT_SECS);
+        let timeout_secs = super::timeout_secs_from_env(
+            "AGENTPIPE_CODEX_TIMEOUT_SECS",
+            DEFAULT_CODEX_TIMEOUT_SECS,
+        );
         Self { bin, timeout_secs }
     }
 

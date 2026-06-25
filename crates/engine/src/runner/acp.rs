@@ -100,11 +100,8 @@ pub struct AcpOutcome {
 
 impl AcpRunner {
     pub fn new(config: AcpConfig) -> Self {
-        let timeout_secs = std::env::var("AGENTPIPE_ACP_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse::<u64>().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(DEFAULT_ACP_TIMEOUT_SECS);
+        let timeout_secs =
+            super::timeout_secs_from_env("AGENTPIPE_ACP_TIMEOUT_SECS", DEFAULT_ACP_TIMEOUT_SECS);
         Self {
             config,
             timeout_secs,

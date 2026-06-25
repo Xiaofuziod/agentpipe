@@ -164,6 +164,23 @@ impl Manifest {
         Ok(())
     }
 
+    /// 非空字段校验(trim 后)。带 step_id + 字段名 + 可选 hint,统一错误文案模板。
+    fn require_non_empty(
+        step_id: &str,
+        field: &str,
+        value: &str,
+        hint: Option<&str>,
+    ) -> Result<(), EngineError> {
+        if value.trim().is_empty() {
+            let hint = hint.map(|h| format!(" ({h})")).unwrap_or_default();
+            Err(EngineError::Validation(format!(
+                "step '{step_id}': 需要 {field} 字段{hint}"
+            )))
+        } else {
+            Ok(())
+        }
+    }
+
     /// codex 判据三个 action 的必填字段校验(codex step 与 verify 门复用)。
     fn validate_codex_fields(
         step_id: &str,
@@ -210,12 +227,12 @@ impl Manifest {
                             }
                         }
                         Verifier::Command => {
-                            if v.command.as_deref().map(str::trim).unwrap_or("").is_empty() {
-                                return Err(EngineError::Validation(format!(
-                                    "step '{}': verify by command 需要 command 字段(shell 命令),例: command: \"cargo test\"",
-                                    step.id
-                                )));
-                            }
+                            Self::require_non_empty(
+                                &step.id,
+                                "verify command",
+                                v.command.as_deref().unwrap_or(""),
+                                Some("shell 命令,例: command: \"cargo test\""),
+                            )?;
                         }
                     }
                     if v.max_retries > MAX_VERIFY_RETRIES {
@@ -257,24 +274,14 @@ impl Manifest {
                 Ok(())
             }
             StepKind::Acp { agent, command, prompt } => {
-                if agent.trim().is_empty() {
-                    return Err(EngineError::Validation(format!(
-                        "step '{}': acp 需要 agent 字段(显示用名称)",
-                        step.id
-                    )));
-                }
-                if command.trim().is_empty() {
-                    return Err(EngineError::Validation(format!(
-                        "step '{}': acp 需要 command 字段(启动外部 agent 的完整命令)",
-                        step.id
-                    )));
-                }
-                if prompt.trim().is_empty() {
-                    return Err(EngineError::Validation(format!(
-                        "step '{}': acp 需要 prompt 字段",
-                        step.id
-                    )));
-                }
+                Self::require_non_empty(&step.id, "acp.agent", agent, Some("显示用名称"))?;
+                Self::require_non_empty(
+                    &step.id,
+                    "acp.command",
+                    command,
+                    Some("启动外部 agent 的完整命令"),
+                )?;
+                Self::require_non_empty(&step.id, "acp.prompt", prompt, None)?;
                 Ok(())
             }
             _ => Ok(()),

@@ -13,7 +13,7 @@ Set Theme { "name": "AgentPipe", "background": "#080b0a", "foreground": "#e6edf0
 
 # --- hidden setup: point AgentPipe at the demo stubs, prep a throwaway repo ---
 Hide
-Type "cd /path/to/agentpipe" Enter
+# run `vhs demo/agentpipe.tape` from the repo root
 Type "export PATH=$PWD/target/release:$PATH" Enter
 Type "export AGENTPIPE_CLAUDE_BIN=$PWD/demo/stub-claude.sh AGENTPIPE_CODEX_BIN=$PWD/demo/stub-codex.sh" Enter
 Type "export AGENTPIPE_HOME=/tmp/ap-demo" Enter

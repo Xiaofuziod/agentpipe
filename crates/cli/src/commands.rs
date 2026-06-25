@@ -10,7 +10,7 @@ use crate::runs_dir;
 /// 解析 run-id → ndjson 路径,带 allowlist 校验(防路径穿越)。
 fn run_path(run_id: &str) -> Option<PathBuf> {
     if !is_valid_run_id(run_id) {
-        eprintln!("非法 run-id: {run_id}");
+        eprintln!("invalid run-id: {run_id}");
         return None;
     }
     Some(runs_dir().join(format!("{run_id}.ndjson")))
@@ -23,7 +23,7 @@ fn load_run(run_id: &str) -> Vec<RunEntry> {
     match read_run(&path) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("读取 {run_id} 失败: {e}");
+            eprintln!("failed to read {run_id}: {e}");
             std::process::exit(1);
         }
     }
@@ -33,7 +33,7 @@ fn load_run(run_id: &str) -> Vec<RunEntry> {
 pub fn runs() {
     let dir = runs_dir();
     let Ok(rd) = std::fs::read_dir(&dir) else {
-        println!("(无历史 run: {})", dir.display());
+        println!("(no runs: {})", dir.display());
         return;
     };
     let mut ids: Vec<String> = rd
@@ -44,7 +44,7 @@ pub fn runs() {
     ids.sort();
     ids.reverse(); // 时间戳前缀 → 倒序即最新在前
     if ids.is_empty() {
-        println!("(无历史 run)");
+        println!("(no runs)");
         return;
     }
     for id in ids {
@@ -63,7 +63,7 @@ pub fn view(run_id: &str) {
     }
     let complete = matches!(entries.last().map(|e| &e.event), Some(Event::RunFinished { .. }));
     if !complete {
-        println!("⚠ 未完成(无 RunFinished,可能中断/崩溃)");
+        println!("⚠ incomplete (no RunFinished; interrupted or crashed)");
     }
 }
 
@@ -74,7 +74,7 @@ pub fn cost(run_id: &str) {
     for (step, m) in &s.steps {
         println!("  {step}: {}", format_metrics(m.num_turns, m.duration_ms, m.cost_usd));
     }
-    println!("总计: {}", format_metrics(s.total_turns, s.total_duration_ms, s.total_cost_usd));
+    println!("total: {}", format_metrics(s.total_turns, s.total_duration_ms, s.total_cost_usd));
 }
 
 pub fn diff(a: &str, b: &str) {
@@ -86,8 +86,8 @@ pub fn diff(a: &str, b: &str) {
     println!("diff {a} ↔ {b}");
     for k in keys {
         match (fa.get(k), fb.get(k)) {
-            (Some(x), None) => println!("  - {k}: 仅 A ({})", x.status),
-            (None, Some(y)) => println!("  + {k}: 仅 B ({})", y.status),
+            (Some(x), None) => println!("  - {k}: only A ({})", x.status),
+            (None, Some(y)) => println!("  + {k}: only B ({})", y.status),
             (Some(x), Some(y)) if x != y => {
                 println!("  ~ {k}: {} ${:.2} → {} ${:.2}", x.status, x.cost_usd, y.status, y.cost_usd);
             }

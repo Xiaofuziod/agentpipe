@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::thread;
 
 #[derive(Parser)]
-#[command(name = "agentpipe", about = "本地研发流程编排引擎")]
+#[command(name = "agentpipe", about = "Cross-vendor adversarial review pipeline for AI coding CLIs (Claude, Codex)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -19,25 +19,25 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// 执行 task.yaml
+    /// Run a task.yaml
     Run {
         task: String,
-        /// 只解析 + 校验 + 打印执行计划,不起任何 CLI 子进程
+        /// Parse + validate + print the plan only; spawn no CLI subprocess
         #[arg(long)]
         dry_run: bool,
-        /// 事件以 NDJSON 写 stdout,人读日志写 stderr
+        /// Events as NDJSON on stdout, human-readable log on stderr
         #[arg(long)]
         json: bool,
     },
-    /// 仅解析 + 校验 task.yaml
+    /// Parse + validate a task.yaml only
     Validate { task: String },
-    /// 列出历史 run
+    /// List past runs
     Runs,
-    /// 重读某次 run 的事件
+    /// Replay the events of a run
     View { run_id: String },
-    /// 某次 run 的成本拆解
+    /// Cost breakdown of a run
     Cost { run_id: String },
-    /// 对比两次 run
+    /// Diff two runs
     Diff { run_a: String, run_b: String },
 }
 
@@ -51,7 +51,7 @@ pub(crate) fn runs_dir() -> PathBuf {
 
 fn load_manifest(path: &str) -> Manifest {
     let yaml = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("读取 {path} 失败: {e}");
+        eprintln!("failed to read {path}: {e}");
         std::process::exit(1);
     });
     match Manifest::parse(&yaml).and_then(|m| {
@@ -60,7 +60,7 @@ fn load_manifest(path: &str) -> Manifest {
     }) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("manifest 错误: {e}");
+            eprintln!("manifest error: {e}");
             std::process::exit(1);
         }
     }
@@ -72,7 +72,7 @@ fn main() {
         Cmd::Run { task, dry_run, json } => cmd_run(&task, dry_run, json),
         Cmd::Validate { task } => {
             load_manifest(&task);
-            println!("✓ {task} 校验通过");
+            println!("✓ {task} is valid");
         }
         Cmd::Runs => commands::runs(),
         Cmd::View { run_id } => commands::view(&run_id),
@@ -92,7 +92,7 @@ fn cmd_run(task: &str, dry_run: bool, json: bool) {
     }
 
     if dry_run {
-        human!("▶ 执行计划: {}", manifest.name);
+        human!("▶ Plan: {}", manifest.name);
         for step in &manifest.steps {
             human!("{}", render::render_plan_step(step));
         }
@@ -119,10 +119,10 @@ fn cmd_run(task: &str, dry_run: bool, json: bool) {
     for event in erx {
         if matches!(event, Event::RunStarted { .. }) {
             recorder = RunRecorder::open(&run_dir, &name)
-                .map_err(|e| eprintln!("(审计未启用: {e})"))
+                .map_err(|e| eprintln!("(audit disabled: {e})"))
                 .ok();
             if let Some(r) = &recorder {
-                human!("(审计: {})", r.path().display());
+                human!("(audit: {})", r.path().display());
             }
         }
         if let Some(r) = &mut recorder {
@@ -152,9 +152,9 @@ mod commands;
 
 fn prompt_gate(step_id: &str, expects_artifact: bool) -> Command {
     let hint = if expects_artifact {
-        "[y <产物> / s 跳过]"
+        "[y <artifact> / s skip]"
     } else {
-        "[y 批准 / s 跳过]"
+        "[y approve / s skip]"
     };
     eprint!("    > {hint} ");
     let _ = std::io::stderr().flush();
@@ -163,7 +163,7 @@ fn prompt_gate(step_id: &str, expects_artifact: bool) -> Command {
     // read_line 返回 0 = EOF(stdin 关闭 / 管道结束 / Ctrl-D):无人在回路,
     // fail-closed 跳过该步,绝不静默自动批准(claude 步骤一律 bypassPermissions,更不能放过)。
     if n == 0 {
-        eprintln!("    (stdin 已结束,跳过 '{step_id}')");
+        eprintln!("    (stdin closed; skipping '{step_id}')");
         return Command::SkipStep {
             step_id: step_id.to_string(),
         };

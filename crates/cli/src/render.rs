@@ -12,15 +12,15 @@ pub fn render_plan_step(step: &Step) -> String {
         StepKind::Codex { action, .. } => format!("codex {action:?}"),
         StepKind::Human { .. } => "human".into(),
         StepKind::Loop { until, max, body } => {
-            format!("loop until={until} max={max} ({} 步)", body.len())
+            format!("loop until={until} max={max} ({} steps)", body.len())
         }
     };
     format!("  - {} [{detail}]", step.id)
 }
 
-/// StepMetrics 的人读片段:`N 轮 · X.Xs · $Y.YY`。render_event 与 cost 子命令共用,避免格式漂移。
+/// StepMetrics 的人读片段:`N turns · X.Xs · $Y.YY`。render_event 与 cost 子命令共用,避免格式漂移。
 pub fn format_metrics(num_turns: u32, duration_ms: u64, cost_usd: f64) -> String {
-    format!("{} 轮 · {:.1}s · ${:.2}", num_turns, duration_ms as f64 / 1000.0, cost_usd)
+    format!("{} turns · {:.1}s · ${:.2}", num_turns, duration_ms as f64 / 1000.0, cost_usd)
 }
 
 /// 事件 → 人读一行。纯函数:无任何 I/O / stdin,view / dry-run / run 共用。
@@ -43,12 +43,12 @@ pub fn render_event(event: &Event) -> String {
         }
         Event::StepFailed { step_id, error } => format!("  ✗ {step_id}: {error}"),
         Event::WorktreeReady { path, branch } => format!("  ⑂ worktree: {branch} @ {path}"),
-        Event::WorktreeFailed { error } => format!("  ✗ worktree 创建失败: {error}"),
-        Event::LoopIteration { loop_id, iteration } => format!("  ↻ {loop_id} 第 {iteration} 轮"),
-        Event::LoopConverged { loop_id, iterations } => format!("  ✓ {loop_id} {iterations} 轮收敛"),
-        Event::LoopMaxReached { loop_id, max } => format!("  ⚠ {loop_id} 到上限 {max} 仍未干净"),
+        Event::WorktreeFailed { error } => format!("  ✗ worktree failed: {error}"),
+        Event::LoopIteration { loop_id, iteration } => format!("  ↻ {loop_id} round {iteration}"),
+        Event::LoopConverged { loop_id, iterations } => format!("  ✓ {loop_id} converged in {iterations} round(s)"),
+        Event::LoopMaxReached { loop_id, max } => format!("  ⚠ {loop_id} hit max {max}, still not clean"),
         Event::StepAwaitingGate { step_id, suggestion, .. } => format!("  ⏸ {step_id}: {suggestion}"),
-        Event::RunFinished { status } => format!("■ 结束: {status:?}"),
+        Event::RunFinished { status } => format!("■ Done: {status:?}"),
     }
 }
 
@@ -71,7 +71,7 @@ mod tests {
             summary: "done".into(),
             metrics: Some(StepMetrics { num_turns: 7, duration_ms: 41200, cost_usd: 0.83 }),
         };
-        assert_eq!(render_event(&e), "  ✓ impl: done · 7 轮 · 41.2s · $0.83");
+        assert_eq!(render_event(&e), "  ✓ impl: done · 7 turns · 41.2s · $0.83");
     }
 
     #[test]
@@ -81,19 +81,19 @@ mod tests {
             branch: "agentpipe/fix-1-2".into(),
         };
         assert_eq!(render_event(&ready), "  ⑂ worktree: agentpipe/fix-1-2 @ /tmp/.agentpipe-worktrees/repo-1-2");
-        let failed = Event::WorktreeFailed { error: "不是 git 仓库".into() };
-        assert_eq!(render_event(&failed), "  ✗ worktree 创建失败: 不是 git 仓库");
+        let failed = Event::WorktreeFailed { error: "not a git repo".into() };
+        assert_eq!(render_event(&failed), "  ✗ worktree failed: not a git repo");
     }
 
     #[test]
     fn renders_awaiting_gate_without_prompting() {
         let e = Event::StepAwaitingGate {
             step_id: "plan".into(),
-            suggestion: "审批".into(),
+            suggestion: "approve?".into(),
             expects_artifact: false,
             gate_kind: agentpipe_engine::protocol::GateKind::Decision,
         };
-        assert_eq!(render_event(&e), "  ⏸ plan: 审批");
+        assert_eq!(render_event(&e), "  ⏸ plan: approve?");
     }
 
     #[test]
@@ -101,10 +101,10 @@ mod tests {
         let e = Event::StepFinished {
             step_id: "build".into(),
             status: StepStatus::Failed,
-            summary: "编译失败".into(),
+            summary: "build failed".into(),
             metrics: None,
         };
-        assert_eq!(render_event(&e), "  ✗ build: 编译失败");
+        assert_eq!(render_event(&e), "  ✗ build: build failed");
     }
 
     #[test]

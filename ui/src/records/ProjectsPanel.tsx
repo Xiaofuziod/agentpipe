@@ -30,6 +30,7 @@ export function ProjectsPanel({
   onSelectProject,
   onSelectLive,
   onSelectHistory,
+  onDeleteRun,
   compareIds,
   onToggleCompare,
   onCompare,
@@ -46,6 +47,8 @@ export function ProjectsPanel({
   onSelectProject: (target: string) => void;
   onSelectLive: () => void;
   onSelectHistory: (runId: string) => void;
+  /** 删除一条历史 run(落盘记录) */
+  onDeleteRun: (runId: string) => void;
   /** 选中参与对比的 run_id 列表(最多 2 条) */
   compareIds: string[];
   onToggleCompare: (runId: string) => void;
@@ -167,6 +170,18 @@ export function ProjectsPanel({
                               <span className={`status-dot ${dotClass}`} />
                               <span className="rec-name">{r.name || "未命名"}</span>
                               {!r.complete && <span className="rec-incomplete" title="未完整结束">⚠</span>}
+                              <button
+                                className="rec-del"
+                                title="删除这条记录"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (window.confirm(`删除运行记录「${r.name || "未命名"}」?此操作不可撤销。`)) {
+                                    onDeleteRun(r.run_id);
+                                  }
+                                }}
+                              >
+                                ✕
+                              </button>
                             </div>
                             <div className="rec-meta">
                               {r.step_count} 步

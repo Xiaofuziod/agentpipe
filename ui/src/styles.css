@@ -283,6 +283,29 @@ body {
   color: var(--text-faint);
   padding-left: 16px;
 }
+/* 删除按钮:默认隐形,record 行 hover 时淡出;自身 hover 转危险色 */
+.rec-del {
+  border: none;
+  background: transparent;
+  padding: 2px 5px;
+  margin-left: 2px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text-faint);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.record-item:hover .rec-del {
+  opacity: 0.65;
+}
+.rec-del:hover {
+  opacity: 1;
+  color: var(--danger);
+  background: var(--danger-soft);
+}
 .status-dot {
   width: 8px;
   height: 8px;

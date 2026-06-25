@@ -59,6 +59,11 @@ pub enum StepKind {
         instruction: String,
         #[serde(default)]
         expects: Option<String>,
+        /// 启动时预置的人工输入(GUI「启动任务」表单注入)。Some 且插值后非空则直接记录为
+        /// 产物、跳过人工 gate;否则维持发 gate 等用户。模板不存此字段(保持通用),仅
+        /// inline 启动时注入。缺省 None → 向后兼容现存 YAML / step 模板。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
     },
     Loop {
         until: String,

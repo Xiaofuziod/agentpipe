@@ -15,6 +15,7 @@ export const ipc = {
     listen<EngineEvent>("engine://event", (e) => cb(e.payload)),
   listRuns: () => invoke<RunSummary[]>("list_runs"),
   viewRun: (runId: string) => invoke<EngineEvent[]>("view_run", { runId }),
+  deleteRun: (runId: string) => invoke<void>("delete_run", { runId }),
   diffRuns: (a: string, b: string) => invoke<DiffRow[]>("diff_runs", { a, b }),
   onRunStartedId: (cb: (runId: string) => void): Promise<UnlistenFn> =>
     listen<{ run_id: string }>("engine://run-started-id", (e) => cb(e.payload.run_id)),

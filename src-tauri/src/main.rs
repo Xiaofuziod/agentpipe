@@ -22,6 +22,7 @@ fn main() {
             commands::load_template,
             commands::list_runs,
             commands::view_run,
+            commands::delete_run,
             commands::diff_runs,
         ])
         .run(tauri::generate_context!())

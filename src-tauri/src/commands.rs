@@ -231,6 +231,18 @@ pub fn view_run(run_id: String) -> Result<Vec<Event>, String> {
     view_run_impl(&run_id)
 }
 
+/// 删除一条运行记录(左侧列表的删除入口)。run_path_checked 内含 is_valid_run_id
+/// 防路径穿越;文件不存在视同成功(幂等,UI 重复点不报错)。
+#[tauri::command]
+pub fn delete_run(run_id: String) -> Result<(), String> {
+    let path = run_path_checked(&run_id)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("删除 {} 失败: {e}", path.display())),
+    }
+}
+
 #[tauri::command]
 pub fn diff_runs(a: String, b: String) -> Result<Vec<DiffRow>, String> {
     let pa = run_path_checked(&a)?;
@@ -301,5 +313,16 @@ mod tests {
     #[test]
     fn view_run_rejects_traversal() {
         assert!(view_run_impl("../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn delete_run_rejects_traversal() {
+        assert!(delete_run("../etc/passwd".into()).is_err());
+    }
+
+    #[test]
+    fn delete_run_is_idempotent_for_missing() {
+        // 合法但不存在的 run-id → 幂等成功(UI 重复点不报错)
+        assert!(delete_run("20990101-000000-abcd".into()).is_ok());
     }
 }

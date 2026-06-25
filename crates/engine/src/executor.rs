@@ -273,9 +273,9 @@ impl Executor {
                     }
                 }
             }
-            StepKind::Human { instruction, expects } => {
+            StepKind::Human { instruction, expects, value } => {
                 let instr = self.ctx.interpolate(instruction);
-                self.run_human(step, &instr, expects.is_some())
+                self.run_human(step, &instr, expects.is_some(), value.as_deref())
             }
             StepKind::Loop { until, max, body } => self.run_loop(&step.id, until, *max, body, gated),
         }
@@ -367,7 +367,29 @@ impl Executor {
         }
     }
 
-    fn run_human(&mut self, step: &Step, instruction: &str, expects_artifact: bool) -> Result<(), ()> {
+    fn run_human(
+        &mut self,
+        step: &Step,
+        instruction: &str,
+        expects_artifact: bool,
+        seed: Option<&str>,
+    ) -> Result<(), ()> {
+        // 启动时预置了人工输入 → 直接记录为产物,跳过 gate(不阻塞 recv)。
+        // 插值后为空视同未预置,回退到正常 gate(防止 GUI 漏填仍能人工补)。
+        if let Some(raw) = seed {
+            let val = self.ctx.interpolate(raw);
+            if !val.trim().is_empty() {
+                self.ctx.record(
+                    &step.id,
+                    StepOutput {
+                        artifact: Some(val),
+                        ..Default::default()
+                    },
+                );
+                self.finish(&step.id, "approved (preset)".into(), None);
+                return Ok(());
+            }
+        }
         let _ = self.events.send(Event::StepAwaitingGate {
             step_id: step.id.clone(),
             suggestion: instruction.to_string(),

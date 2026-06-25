@@ -29,8 +29,24 @@
 
 1. `gitleaks detect`(P6 已自动跑一遍)— 转公开前再确认无遗漏。
 2. 确认仓库 Settings → 改 public;补 repo description + topics(`claude-code` `codex` `ai-agents` `code-review` `rust` `tauri`)。
-3. awesome 提交(仓库公开后):
-   - bradAGI/awesome-cli-coding-agents:在 orchestrators/harness 段加一行。
-   - andyrewlee/awesome-agent-orchestrators:加一行。
-   - 文案:`AgentPipe — Cross-vendor adversarial review pipeline: Claude writes, Codex reviews, loop until clean, with deterministic command gates. Rust engine + Tauri desktop GUI. (macOS-first)`
-4. LICENSE 版权人按需改成真实姓名/组织。
+3. awesome 提交(**仓库必须先公开** —— 两个清单都只收可访问的公开链接,指向私有仓的 PR=404 会被拒)。格式已对齐各自 README,直接 PR 加这一行:
+
+   - `bradAGI/awesome-cli-coding-agents` → 段落 `## Harnesses & orchestration` / `### Orchestrators & autonomous loops`(段内按 star 降序,新仓 0 star 放末尾):
+     ```
+     - **[AgentPipe](https://github.com/Xiaofuziod/agentpipe)** `⭐ 0` — Cross-vendor adversarial review pipeline: Claude writes, Codex reviews, loop until clean, gated on your own test commands. Rust engine + Tauri desktop GUI; macOS-first.
+     ```
+   - `andyrewlee/awesome-agent-orchestrators` → 段落 `Autonomous Loop Runners`:
+     ```
+     [AgentPipe](https://github.com/Xiaofuziod/agentpipe) - Cross-vendor adversarial review pipeline: Claude writes, Codex reviews, looping until clean, gated on your own test commands. Rust engine + Tauri desktop GUI; macOS-first.
+     ```
+   - 提交方式(仓库公开后,gh 已登录 Xiaofuziod):各 fork → 改 README → PR。注意:全新 0-star 仓提 star 降序清单可能被维护者搁置,属预期。
+
+4. LICENSE 版权人(当前占位 `AgentPipe authors`)按需改成真实姓名/组织。
+
+附:仓库元数据(公开前后均可,gh 已登录):
+```
+gh repo edit Xiaofuziod/agentpipe \
+  --description "Cross-vendor adversarial review pipeline for AI coding CLIs (Claude writes, Codex reviews, loop until clean) with deterministic command gates. Rust + Tauri." \
+  --add-topic claude-code --add-topic codex --add-topic ai-agents \
+  --add-topic code-review --add-topic rust --add-topic tauri
+```

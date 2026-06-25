@@ -123,7 +123,7 @@ fn render_event(event: &Event) -> String   // 事件 → 人读一行,无任何 
 - **replay = 重执行**:LLM 非确定性,重跑等于再 `run` 一次 task.yaml,价值低、成本高。明确不做;`view`(重读)已满足"看上次发生了什么"。
 - undo / 改写 git 历史:破坏性,且 AgentPipe 不持有 git 操作主权(claude/codex 自己提交);如需,仅做 ccswarm 式 advisory 列 commit(不自动执行),留待独立 backlog。
 - 远程/云端聚合、多机:仅本地 `~/.agentpipe/runs/`。
-- 审计内容脱敏:NDJSON 仅本地、含 prompt/findings 明文;与现有终端输出同级敏感度,不额外脱敏(若未来上报再议,对齐 本地"日志仅本地"红线)。
+- 审计内容脱敏:NDJSON 仅本地、含 prompt/findings 明文;与现有终端输出同级敏感度,不额外脱敏(若未来上报再议,遵循"日志仅本地"的惯例)。
 - 日志轮转/清理:Phase 1 不做;`runs` 列表 + 手动删足够,容量策略留观察。
 
 ## 11. 落地顺序建议(供 plan)

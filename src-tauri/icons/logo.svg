@@ -1,0 +1,39 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0e1614"/>
+      <stop offset="1" stop-color="#070a09"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#2ef08f" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#2ef08f" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="pipe" x1="280" y1="320" x2="760" y2="700" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#46ffa6"/>
+      <stop offset="1" stop-color="#1ea968"/>
+    </linearGradient>
+  </defs>
+
+  <!-- card -->
+  <rect x="0" y="0" width="1024" height="1024" rx="228" fill="url(#bg)"/>
+  <rect x="6" y="6" width="1012" height="1012" rx="222" fill="none" stroke="#2ef08f" stroke-opacity="0.16" stroke-width="3"/>
+  <circle cx="512" cy="512" r="430" fill="url(#glow)"/>
+
+  <!-- pipes: two inputs fan-in to a merge node, then out to a result; with an iteration loop -->
+  <g stroke="url(#pipe)" stroke-width="48" stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M300 332 L516 512"/>
+    <path d="M300 692 L516 512"/>
+    <path d="M516 512 L744 512"/>
+  </g>
+
+  <!-- iteration loop arc above the merge->result segment -->
+  <path d="M724 470 C724 388 536 388 536 470" stroke="#2ef08f" stroke-opacity="0.85" stroke-width="30" stroke-linecap="round" fill="none"/>
+  <path d="M512 470 l28 -16 l-2 36 z" fill="#2ef08f"/>
+
+  <!-- nodes -->
+  <circle cx="300" cy="332" r="54" fill="#0e1614" stroke="url(#pipe)" stroke-width="34"/>
+  <circle cx="300" cy="692" r="54" fill="#0e1614" stroke="url(#pipe)" stroke-width="34"/>
+  <circle cx="516" cy="512" r="74" fill="#2ef08f"/>
+  <circle cx="516" cy="512" r="30" fill="#0a1410"/>
+  <circle cx="744" cy="512" r="56" fill="#0e1614" stroke="#46ffa6" stroke-width="34"/>
+</svg>

@@ -41,6 +41,48 @@ pub struct AcpConfig {
     pub command: String,
 }
 
+/// 一条从 notification callback 收到的事件:同时承担 transcript 留痕与 answer 聚合。
+/// `MsgChunk` 同时存 raw text(拼 answer 用)与 rendered 行(transcript 用),其他类型
+/// 只留 rendered。两类合一个 Vec,避免 chunks/transcript 两份 state 冗余。
+enum AcpEvent {
+    MsgChunk { text: String, rendered: String },
+    Other { rendered: String },
+}
+
+impl AcpEvent {
+    fn rendered(&self) -> &str {
+        match self {
+            AcpEvent::MsgChunk { rendered, .. } | AcpEvent::Other { rendered } => rendered,
+        }
+    }
+    fn msg_text(&self) -> Option<&str> {
+        match self {
+            AcpEvent::MsgChunk { text, .. } => Some(text),
+            _ => None,
+        }
+    }
+}
+
+/// 把所有反向 fs/terminal request type 一次性注册成 method_not_found reject handler。
+/// 见 §7.4 / commit c2e6d02:逐 type 而非 dispatch fallback,否则 SDK 1.0 会把
+/// outbound initialize 的 response 路径也拦掉。新增反向 type 加进列表即可。
+macro_rules! reject_unsupported_reverse_requests {
+    ($builder:expr, [$($T:ty),* $(,)?] $(,)?) => {{
+        let b = $builder;
+        $(
+            let b = b.on_receive_request(
+                async move |_r: $T, responder, _cx| {
+                    responder.respond_with_error(
+                        agent_client_protocol::Error::method_not_found(),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        )*
+        b
+    }};
+}
+
 pub struct AcpRunner {
     config: AcpConfig,
     timeout_secs: u64,
@@ -105,9 +147,8 @@ impl AcpRunner {
         on_progress: &mut dyn FnMut(&str, Option<u32>),
         cwd: &Path,
     ) -> Result<AcpOutcome, EngineError> {
-        // 共享状态。notification 异步回调累计;主流程在 connect_with 退出后取最终值。
-        let chunks = Arc::new(Mutex::new(Vec::<String>::new()));
-        let transcript = Arc::new(Mutex::new(Vec::<String>::new()));
+        // notification callback 累计;主流程在 connect_with 退出后取最终值。
+        let events: Arc<Mutex<Vec<AcpEvent>>> = Arc::new(Mutex::new(Vec::new()));
 
         // 流式 progress 通道:notification 内 `send`(同步),主循环 `recv` 后调
         // `on_progress`。on_progress 是 `&mut dyn FnMut`,不 Send/Sync,所以
@@ -123,31 +164,35 @@ impl AcpRunner {
         })?;
 
         let cwd_owned = cwd.to_path_buf();
-        let chunks_for_cb = chunks.clone();
-        let transcript_for_cb = transcript.clone();
-        let tx_for_cb = progress_tx.clone();
 
-        let connect_fut = agent_client_protocol::Client
+        let builder = agent_client_protocol::Client
             .builder()
             .on_receive_notification(
                 {
-                    let chunks = chunks_for_cb;
-                    let transcript = transcript_for_cb;
-                    let tx = tx_for_cb;
+                    let events = events.clone();
+                    let tx = progress_tx.clone();
                     move |notification: SessionNotification, _cx| {
-                        let chunks = chunks.clone();
-                        let transcript = transcript.clone();
+                        let events = events.clone();
                         let tx = tx.clone();
                         async move {
-                            let line = format_update_for_log(&notification.update);
-                            transcript.lock().unwrap().push(line.clone());
-                            // 把行送给主流程喂 on_progress(失败 = 主流程已退,丢弃即可)。
-                            let _ = tx.send(line);
-                            if let SessionUpdate::AgentMessageChunk(chunk) = &notification.update {
-                                if let ContentBlock::Text(t) = &chunk.content {
-                                    chunks.lock().unwrap().push(t.text.clone());
-                                }
-                            }
+                            let rendered = format_update_for_log(&notification.update);
+                            let event = match &notification.update {
+                                SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+                                    ContentBlock::Text(t) => AcpEvent::MsgChunk {
+                                        text: t.text.clone(),
+                                        rendered: rendered.clone(),
+                                    },
+                                    _ => AcpEvent::Other {
+                                        rendered: rendered.clone(),
+                                    },
+                                },
+                                _ => AcpEvent::Other {
+                                    rendered: rendered.clone(),
+                                },
+                            };
+                            events.lock().unwrap().push(event);
+                            // 把渲染行送给主流程喂 on_progress(失败 = 主流程已退,丢弃即可)。
+                            let _ = tx.send(rendered);
                             Ok(())
                         }
                     }
@@ -163,55 +208,25 @@ impl AcpRunner {
                     ))
                 },
                 agent_client_protocol::on_receive_request!(),
-            )
-            // 反向 fs/terminal capability 全部 fail-loud method_not_found:MVP 不声明这些
-            // 能力(spec §3 / §7.4),agent 应直接用本机 fs;万一发了反向请求,立即回错而不
-            // 让 send_request 永远阻塞(spec §6 防 agent 卡死)。逐 type 注册而非走
-            // on_receive_dispatch 兜底:dispatch fallback 在 SDK 1.0 会拦截 outbound
-            // response 的 method 名,误把 initialize 等 client 主动请求的回路 reject 掉。
-            .on_receive_request(
-                async move |_r: ReadTextFileRequest, responder, _cx| {
-                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
-                },
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |_r: WriteTextFileRequest, responder, _cx| {
-                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
-                },
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |_r: CreateTerminalRequest, responder, _cx| {
-                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
-                },
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |_r: TerminalOutputRequest, responder, _cx| {
-                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
-                },
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |_r: ReleaseTerminalRequest, responder, _cx| {
-                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
-                },
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |_r: KillTerminalRequest, responder, _cx| {
-                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
-                },
-                agent_client_protocol::on_receive_request!(),
-            )
-            .on_receive_request(
-                async move |_r: WaitForTerminalExitRequest, responder, _cx| {
-                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
-                },
-                agent_client_protocol::on_receive_request!(),
-            )
-            .connect_with(agent, move |connection: ConnectionTo<Agent>| async move {
+            );
+
+        // 反向 fs/terminal capability 全部 fail-loud method_not_found:MVP 不声明这些能力
+        // (spec §3 / §7.4),agent 应直接用本机 fs;万一发了反向请求,立即回错而不让
+        // send_request 永远阻塞(spec §6 防 agent 卡死)。
+        let builder = reject_unsupported_reverse_requests!(
+            builder,
+            [
+                ReadTextFileRequest,
+                WriteTextFileRequest,
+                CreateTerminalRequest,
+                TerminalOutputRequest,
+                ReleaseTerminalRequest,
+                KillTerminalRequest,
+                WaitForTerminalExitRequest,
+            ],
+        );
+
+        let connect_fut = builder.connect_with(agent, move |connection: ConnectionTo<Agent>| async move {
                 // initialize 握手 + 版本协商。
                 let init = connection
                     .send_request(InitializeRequest::new(ProtocolVersion::V1))
@@ -289,14 +304,18 @@ impl AcpRunner {
 
         let stop_reason = outcome?;
 
-        let answer = chunks.lock().unwrap().join("");
+        let events = events.lock().unwrap();
+        let answer: String = events.iter().filter_map(AcpEvent::msg_text).collect();
         if answer.trim().is_empty() {
             return Err(EngineError::Cli(format!(
                 "acp: agent 未返回任何文本 (stop_reason: {stop_reason:?})"
             )));
         }
-
-        let full_transcript = transcript.lock().unwrap().join("\n");
+        let full_transcript = events
+            .iter()
+            .map(AcpEvent::rendered)
+            .collect::<Vec<_>>()
+            .join("\n");
         Ok(AcpOutcome {
             answer,
             metrics: None,

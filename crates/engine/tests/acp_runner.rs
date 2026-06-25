@@ -138,6 +138,16 @@ fn abort_mid_stream_returns_promptly() {
 }
 
 #[test]
+fn fs_reverse_request_is_rejected_without_hang() {
+    // mock 在 prompt 内主动发反向 fs/read_text_file;client MVP 不声明 fs capability,
+    // SDK 应当返回 method_not_found 类错误。mock 忽略错误后继续发 "ok" chunk 并 EndTurn,
+    // client 必须能正常完成并拼出 "ok" answer,不卡死(spec §3 / §7.4)。
+    let (res, _progress) = run_scenario_full("fs_probe", "probe", 30, None);
+    let outcome = res.expect("fs_probe 场景应当成功(反向请求被拒不影响主流程)");
+    assert_eq!(outcome.answer, "ok", "反向请求被拒后 agent 仍能完成 prompt");
+}
+
+#[test]
 fn timeout_mid_stream_returns_promptly() {
     // long_stream 每秒发 1 chunk × 30 次,timeout 设 1s → 应在 ~1-2s 内 timeout 错误返回。
     let started = Instant::now();

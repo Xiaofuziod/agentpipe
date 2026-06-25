@@ -8,14 +8,18 @@
 //! - empty:不发任何 chunk 直接 EndTurn,client 必须 fail-loud。
 //! - long_stream:每秒发 1 个 chunk × 30 次,留窗口让 abort/timeout 测试触发。
 //! - wrong_version:initialize 返回 ProtocolVersion::V0,client 必须 fail-loud。
+//! - fs_probe:server 主动 send_request(ReadTextFileRequest) 探 client 反向 capability;
+//!   MVP client 不声明 fs capability,SDK 应自动报错;mock 忽略错误继续发 chunk
+//!   并完成 prompt,验"反向请求被拒不卡死"(spec §7.4)。
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
-    SessionNotification, SessionUpdate, StopReason, TextContent,
+    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ReadTextFileRequest,
+    SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
 };
 use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Result, Stdio};
+use std::path::PathBuf;
 use std::time::Duration;
 
 fn scenario() -> String {
@@ -72,6 +76,36 @@ async fn main() -> Result<()> {
                         }
                         "empty" => {
                             // 不发任何 chunk,直接 EndTurn。client 应当 fail-loud。
+                            responder.respond(PromptResponse::new(StopReason::EndTurn))
+                        }
+                        "fs_probe" => {
+                            // 探 client 反向 capability:fs/read_text_file。
+                            // 注意:SDK 单 event loop,不能在 handler 内 block_task 等 self
+                            // request 的 response(死锁);用 cx.spawn 把 probe 扔后台跑,
+                            // 主流程立即 chunk + EndTurn 让 client 完成。client 端注册了
+                            // ReadTextFileRequest 的 reject handler → 后台 task 应快速拿到
+                            // method_not_found 错误,日志可观察。
+                            let _ = cx.spawn({
+                                let cx2 = cx.clone();
+                                let sid = prompt.session_id.clone();
+                                async move {
+                                    let r = cx2
+                                        .send_request(ReadTextFileRequest::new(
+                                            sid,
+                                            PathBuf::from("/tmp/non-existent-probe"),
+                                        ))
+                                        .block_task()
+                                        .await;
+                                    eprintln!("[mock-acp-agent] fs_probe result: {r:?}");
+                                    Ok(())
+                                }
+                            });
+                            let _ = cx.send_notification(SessionNotification::new(
+                                prompt.session_id.clone(),
+                                SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                    ContentBlock::Text(TextContent::new("ok")),
+                                )),
+                            ));
                             responder.respond(PromptResponse::new(StopReason::EndTurn))
                         }
                         "long_stream" => {

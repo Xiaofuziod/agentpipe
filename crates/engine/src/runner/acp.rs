@@ -11,9 +11,11 @@ use crate::error::EngineError;
 use crate::protocol::StepMetrics;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SessionNotification, SessionUpdate,
-    TextContent,
+    ContentBlock, CreateTerminalRequest, InitializeRequest, KillTerminalRequest,
+    NewSessionRequest, PromptRequest, ReadTextFileRequest, ReleaseTerminalRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SessionNotification, SessionUpdate, TerminalOutputRequest, TextContent,
+    WaitForTerminalExitRequest, WriteTextFileRequest,
 };
 use agent_client_protocol::{AcpAgent, Agent, ConnectionTo};
 use std::path::Path;
@@ -159,6 +161,53 @@ impl AcpRunner {
                     responder.respond(RequestPermissionResponse::new(
                         RequestPermissionOutcome::Cancelled,
                     ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            // 反向 fs/terminal capability 全部 fail-loud method_not_found:MVP 不声明这些
+            // 能力(spec §3 / §7.4),agent 应直接用本机 fs;万一发了反向请求,立即回错而不
+            // 让 send_request 永远阻塞(spec §6 防 agent 卡死)。逐 type 注册而非走
+            // on_receive_dispatch 兜底:dispatch fallback 在 SDK 1.0 会拦截 outbound
+            // response 的 method 名,误把 initialize 等 client 主动请求的回路 reject 掉。
+            .on_receive_request(
+                async move |_r: ReadTextFileRequest, responder, _cx| {
+                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_r: WriteTextFileRequest, responder, _cx| {
+                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_r: CreateTerminalRequest, responder, _cx| {
+                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_r: TerminalOutputRequest, responder, _cx| {
+                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_r: ReleaseTerminalRequest, responder, _cx| {
+                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_r: KillTerminalRequest, responder, _cx| {
+                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_r: WaitForTerminalExitRequest, responder, _cx| {
+                    responder.respond_with_error(agent_client_protocol::Error::method_not_found())
                 },
                 agent_client_protocol::on_receive_request!(),
             )

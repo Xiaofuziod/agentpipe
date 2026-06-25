@@ -2,6 +2,9 @@
 name = "agentpipe-cli"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "CLI for AgentPipe — a cross-vendor adversarial review pipeline for AI coding agents."
+repository = "https://github.com/Xiaofuziod/agentpipe"
 
 [[bin]]
 name = "agentpipe"

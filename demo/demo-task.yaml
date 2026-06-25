@@ -1,0 +1,36 @@
+version: 1
+name: "Cross-vendor review loop"
+# Demo target — the VHS tape creates this throwaway git repo before running.
+target: /tmp/ap-demo/repo
+mode: auto
+steps:
+  # The MR link is normally entered at launch; preset here so the demo runs headless.
+  - id: mr
+    kind: human
+    instruction: "Paste the MR/PR link to review"
+    expects: "MR link"
+    value: "https://github.com/acme/widgets/pull/42"
+
+  # Claude checks out the PR branch so Codex reviews the right diff.
+  - id: checkout
+    kind: claude
+    prompt: "Check out the branch for {{mr.artifact}} and report the branch name."
+
+  # The core loop: Codex (a different vendor) reviews, Claude fixes, repeat until clean.
+  - id: review-fix
+    kind: loop
+    until: codex-clean
+    max: 5
+    body:
+      - id: review
+        kind: codex
+        action: review-mr
+        base: main
+      - id: fix
+        kind: claude
+        prompt: "Address Codex's findings on {{mr.artifact}} and push.\n\n{{review.findings}}"
+
+  - id: done
+    kind: human
+    instruction: "Codex is clean — confirm the MR is ready to merge."
+    value: "confirmed"

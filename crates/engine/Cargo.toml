@@ -2,6 +2,9 @@
 name = "agentpipe-engine"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Cross-vendor adversarial review pipeline engine for AI coding CLIs (Claude, Codex)."
+repository = "https://github.com/Xiaofuziod/agentpipe"
 
 [dependencies]
 chrono = "0.4"

@@ -133,6 +133,7 @@ impl Executor {
             StepKind::Claude { .. } => Some("claude"),
             StepKind::Codex { .. } => Some("codex"),
             StepKind::Human { .. } => Some("human"),
+            StepKind::Acp { .. } => Some("acp"),
             StepKind::Loop { .. } => None,
         };
         if let Some(kind) = kind_name {
@@ -276,6 +277,34 @@ impl Executor {
             StepKind::Human { instruction, expects, value } => {
                 let instr = self.ctx.interpolate(instruction);
                 self.run_human(step, &instr, expects.is_some(), value.as_deref())
+            }
+            StepKind::Acp { agent, command, prompt } => {
+                let mut on_line = self.progress_sink(&step.id);
+                let p = self.ctx.interpolate(prompt);
+                let runner = crate::runner::acp::AcpRunner::new(crate::runner::acp::AcpConfig {
+                    agent: agent.clone(),
+                    command: command.clone(),
+                });
+                loop {
+                    match runner.run(&p, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd) {
+                        Ok(out) => {
+                            self.ctx.record(&step.id, StepOutput {
+                                artifact: Some(out.answer.clone()),
+                                ..Default::default()
+                            });
+                            self.finish(&step.id, "done · acp".into(), out.metrics);
+                            return Ok(());
+                        }
+                        Err(e) => match self.handle_failure(&step.id, e.to_string()) {
+                            StepDecision::Retry => continue,
+                            StepDecision::Skip => {
+                                self.emit_skipped(&step.id);
+                                return Ok(());
+                            }
+                            StepDecision::Abort => return Err(()),
+                        },
+                    }
+                }
             }
             StepKind::Loop { until, max, body } => self.run_loop(&step.id, until, *max, body, gated),
         }

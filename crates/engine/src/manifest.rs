@@ -70,6 +70,18 @@ pub enum StepKind {
         max: u32,
         body: Vec<Step>,
     },
+    /// 通用 ACP (Agent Client Protocol) 步骤:把任何实现 ACP server 的外部 agent
+    /// (claude-agent-acp / codex-acp / gemini-cli --acp / ...)接入 pipeline。
+    /// 设计见 docs/specs/2026-06-25-acp-integration-design.md。MVP 不带 skill / verify。
+    Acp {
+        /// 显示用 agent 名称(日志 / UI 展示用,例 "gemini" / "claude-acp")。
+        agent: String,
+        /// 启动外部 ACP server 的完整命令(shell-words 切分),例:
+        /// `"npx @agentclientprotocol/claude-agent-acp"` 或绝对路径 + args。
+        command: String,
+        /// 提示词;支持 `{{step-id.field}}` 插值。
+        prompt: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
@@ -244,6 +256,27 @@ impl Manifest {
                 }
                 Ok(())
             }
+            StepKind::Acp { agent, command, prompt } => {
+                if agent.trim().is_empty() {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': acp 需要 agent 字段(显示用名称)",
+                        step.id
+                    )));
+                }
+                if command.trim().is_empty() {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': acp 需要 command 字段(启动外部 agent 的完整命令)",
+                        step.id
+                    )));
+                }
+                if prompt.trim().is_empty() {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': acp 需要 prompt 字段",
+                        step.id
+                    )));
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -293,5 +326,28 @@ mod tests {
         let m = Manifest::parse("version: 1\nname: t\ntarget: /tmp\nsteps: []\n").unwrap();
         let y = serde_yml::to_string(&m).unwrap();
         assert!(!y.contains("worktree"), "关闭时不应序列化 worktree:\n{y}");
+    }
+
+    #[test]
+    fn acp_parses_minimal_fields() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: ask\n    kind: acp\n    agent: \"gemini\"\n    command: \"gemini --acp\"\n    prompt: \"hi\"\n";
+        let m = Manifest::parse(y).unwrap();
+        assert!(m.validate().is_ok());
+        match &m.steps[0].kind {
+            StepKind::Acp { agent, command, prompt } => {
+                assert_eq!(agent, "gemini");
+                assert_eq!(command, "gemini --acp");
+                assert_eq!(prompt, "hi");
+            }
+            other => panic!("expected Acp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn acp_validate_rejects_empty_command() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: ask\n    kind: acp\n    agent: \"gemini\"\n    command: \"\"\n    prompt: \"hi\"\n";
+        let m = Manifest::parse(y).unwrap();
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("command"), "err = {err}");
     }
 }

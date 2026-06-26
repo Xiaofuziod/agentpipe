@@ -22,7 +22,7 @@ export type StepKind =
   | { kind: "loop"; until: "codex-clean"; max: number; body: Step[] };
 
 export type Step = { id: string } & StepKind;
-export type Manifest = { version: 1; name: string; target: string; mode: RunMode; worktree?: boolean; steps: Step[] };
+export type Manifest = { version: 1; name: string; target: string; mode: RunMode; worktree?: boolean; budget_usd?: number | null; steps: Step[] };
 
 export type GateKind = "step" | "human" | "decision";
 export type StepStatus = "Pending" | "Running" | "AwaitingGate" | "Done" | "Failed" | "Skipped";

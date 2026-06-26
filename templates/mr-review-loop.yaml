@@ -4,6 +4,9 @@ name: "MR 审查-修复循环"
 target: <目标仓库绝对路径>
 # auto:除人工步骤外自动跑,审查-修复循环无需逐步批准
 mode: auto
+# (可选)per-run USD 上限,累计超出 fail-loud 终止;省略 = 无限。审查循环易跑飞,
+# 强烈建议设。docs/specs/2026-06-25-review-loop-budget-and-verdict-design.md
+# budget_usd: 10.0
 steps:
   # 1. 输入要审查的 MR 链接(在批准对话框的「产物」框里粘贴链接)
   - id: mr

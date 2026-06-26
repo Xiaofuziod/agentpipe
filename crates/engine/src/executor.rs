@@ -168,8 +168,12 @@ impl Executor {
 
         match &step.kind {
             StepKind::Codex { action, path, base, prompt } => {
-                let path_i = path.as_ref().map(|p| self.ctx.interpolate(p));
-                let base_i = base.as_ref().map(|b| self.ctx.interpolate(b));
+                // 标识符类字段(base 分支名 / 文件路径)走 interpolate_identifier:
+                // 模板用 {{xxx.artifact}} 动态解析时,LLM artifact 常带前后空白 / 多行 /
+                // 末尾换行(尤其指令"只输出 X"也未必严格遵守)。引擎统一 trim 取首行非空,
+                // 空 → None 让下游 fail-loud。prompt 是自由文本不归一。
+                let path_i = self.interpolate_identifier(path.as_deref());
+                let base_i = self.interpolate_identifier(base.as_deref());
                 let prompt_i = prompt.as_ref().map(|p| self.ctx.interpolate(p));
                 let mut on_line = self.progress_sink(&step.id);
                 loop {
@@ -431,8 +435,9 @@ impl Executor {
                     Some(a) => a,
                     None => return (Verdict::ChangesRequested, "verify codex 缺 action".into(), None),
                 };
-                let path_i = v.path.as_ref().map(|p| self.ctx.interpolate(p));
-                let base_i = v.base.as_ref().map(|b| self.ctx.interpolate(b));
+                // 标识符类字段统一 interpolate_identifier(同 StepKind::Codex 路径)。
+                let path_i = self.interpolate_identifier(v.path.as_deref());
+                let base_i = self.interpolate_identifier(v.base.as_deref());
                 let prompt_i = v.prompt.as_ref().map(|p| self.ctx.interpolate(p));
                 match self.codex.review(
                     action,
@@ -604,6 +609,21 @@ impl Executor {
             }
         }
         false // 没找到 codex step → fail-closed 不收敛
+    }
+
+    /// 标识符类字段(分支名 / 文件路径 / 其他 git ref / shell-safe 名)的插值归一:
+    /// `{{xxx.artifact}}` 解析结果常带前后空白 / 多行 / 末尾换行(LLM 即使被指令
+    /// 「只输出 X」也未必严格遵守)。取首行非空 trim 后字符串;空 → None 让下游
+    /// 路径 fail-loud(避免空串当合法 ref / 含 `\n` 的 `cwd.join` 静默失败)。
+    /// 与 prompt / instruction 这类自由文本字段区分,后者保留原样不归一。
+    fn interpolate_identifier(&self, raw: Option<&str>) -> Option<String> {
+        let r = raw?;
+        let interpolated = self.ctx.interpolate(r);
+        interpolated
+            .lines()
+            .map(str::trim)
+            .find(|s| !s.is_empty())
+            .map(|s| s.to_string())
     }
 
     /// 生成一个把 CLI 进度(行 + 可选模型轮次)转成 StepProgress 事件的回调

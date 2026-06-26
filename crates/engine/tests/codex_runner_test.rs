@@ -206,6 +206,50 @@ fn malformed_finding_missing_core_field_falls_back_to_changes_requested() {
 // stub-codex.sh 现已补 suggestion 字段对齐新 schema,不再作为 legacy 输入。
 
 #[test]
+fn review_mr_errors_when_base_is_none() {
+    // base = None(模板未提供 base 字段 / 动态解析得到空)→ codex 不再静默 fallback
+    // 到 "dev",fail-loud 提示用户用 gh pr view 解析或写死真实 base 分支。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let r = stub().review(
+        &CodexAction::ReviewMr,
+        None,
+        None, // base 缺省
+        None,
+        None,
+        &mut |_: &str, _: Option<u32>| {},
+        &PathBuf::from("."),
+    );
+    let err = r.expect_err("base = None 必须 fail-loud,不能静默 fallback dev");
+    assert!(
+        err.to_string().contains("必须提供 base"),
+        "错误信息应明示 base 缺失: {err}"
+    );
+}
+
+#[test]
+fn review_mr_rejects_base_with_whitespace_or_newline() {
+    // base 含空白 / 换行 → 通常是 LLM artifact 漂移(模板用 {{xxx.artifact}} 动态
+    // 解析 base 时,artifact 可能带末尾换行 / markdown 代码块标记残留)。base_ref_resolvable
+    // 拒绝这类字符,fail-loud 让用户定位上游 step 的 prompt 不够严格。
+    // 引擎层 interpolate_identifier 已 trim 首行,这条是 runner 端兜底。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let r = stub().review(
+        &CodexAction::ReviewMr,
+        None,
+        Some("main\n  extra"), // 多行 + 空白
+        None,
+        None,
+        &mut |_: &str, _: Option<u32>| {},
+        &PathBuf::from("."),
+    );
+    let err = r.expect_err("含空白/换行的 base 必须 fail-loud,不能丢给 git rev-parse");
+    assert!(
+        err.to_string().contains("无法解析"),
+        "错误信息应明示 base 不可解析: {err}"
+    );
+}
+
+#[test]
 fn review_mr_rejects_dash_prefixed_base_ref_fail_loud() {
     // review §A finding #10:base_ref_resolvable 必须拒以 `-` 开头的 base,否则
     // `git rev-parse --verify --quiet --help` 把 `--help` 当 git option(印 help 退 0)

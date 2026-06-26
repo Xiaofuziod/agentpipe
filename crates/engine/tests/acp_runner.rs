@@ -117,6 +117,10 @@ fn wrong_protocol_version_fails_loud() {
 fn abort_mid_stream_returns_promptly() {
     // long_stream agent 每秒发 1 chunk × 30 次 → 总跑 30s。
     // 主线程在 1.5s 时按 abort,期望 acp.run 在 ≤ 3s 总耗时内带 abort 错误返回。
+    // warm-up:cold start 时 BUILD_MOCK 还没跑过,首测会把 cargo build 算进 timer
+    // 造成 flaky;先 mock_command() 触发 ensure_mock_built,确保 mock binary 就绪
+    // 后再开 timer(无副作用,Once 后续 call_once 跳过)。
+    ensure_mock_built();
     let control = Arc::new(Control::default());
     let control_for_aborter = control.clone();
     let aborter = std::thread::spawn(move || {
@@ -150,6 +154,8 @@ fn fs_reverse_request_is_rejected_without_hang() {
 #[test]
 fn timeout_mid_stream_returns_promptly() {
     // long_stream 每秒发 1 chunk × 30 次,timeout 设 1s → 应在 ~1-2s 内 timeout 错误返回。
+    // 同 abort_mid_stream warm-up:防 cold start 把 cargo build 算进 timer。
+    ensure_mock_built();
     let started = Instant::now();
     let (res, _progress) = run_scenario_full("long_stream", "go", 1, None);
     let elapsed = started.elapsed();

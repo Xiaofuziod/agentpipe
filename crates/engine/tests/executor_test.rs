@@ -776,3 +776,51 @@ steps:
     });
     assert!(saw_finished_aborted, "RunFinished 必须报 Aborted: {events:?}");
 }
+
+#[test]
+fn codex_review_mr_base_interpolated_from_artifact_trims_whitespace_and_newlines() {
+    // review §B follow-up:模板用 `base: "{{xxx.artifact}}"` 动态解析 base 时,LLM
+    // artifact 常带末尾换行 / 多余空格(指令"只输出 X"也未必严格遵守)。
+    // interpolate_identifier 必须 trim 取首行非空,否则 git rev-parse 喂含 `\n` 的 ref
+    // 必然失败,错误信息含原始字符让用户更难定位。
+    // 本测试:让一个 human step 输出 "HEAD\n  " 作为 artifact,下游 review-mr 用插值,
+    // 引擎应该 trim 后传 "HEAD" 给 codex(可解析 → 走 stub → 正常完成)。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _v = EnvGuard::set("STUB_VERDICT", "clean");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: base-detect
+    kind: human
+    instruction: "模拟 LLM 输出 base 分支名"
+    value: "HEAD\n  "
+  - id: review
+    kind: codex
+    action: review-mr
+    base: "{{base-detect.artifact}}"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_ctx, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+    assert_eq!(
+        status,
+        RunStatus::Success,
+        "trim 后 base=HEAD 应可解析,review 应正常完成,实际 {status:?}"
+    );
+    let events: Vec<Event> = erx.try_iter().collect();
+    // 不应有"无法解析"或"必须提供"的 fail-loud StepFailed
+    let unwanted = events.iter().any(|e| {
+        matches!(
+            e,
+            Event::StepFailed { step_id, error, .. }
+                if step_id == "review"
+                && (error.contains("无法解析") || error.contains("必须提供 base"))
+        )
+    });
+    assert!(!unwanted, "base 经 trim 后应正常 review,不该 fail-loud: {events:?}");
+}

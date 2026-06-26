@@ -109,7 +109,23 @@ impl CodexRunner {
         // review-doc 把文档内容经 stdin 喂给 codex(spec 7.2);其余 action 无 stdin。
         let (args, stdin): (Vec<String>, Option<String>) = match action {
             CodexAction::ReviewMr => {
-                let b = base.unwrap_or("dev");
+                // base 必须由 caller 提供(写死或模板用 {{...}} 动态解析,见 templates/);
+                // 不再有 fallback "dev" — 写死 "dev" 是「review-mr 默认审 dev」的隐式假设,
+                // 在 main / master 仓库直接出错且报「ref `dev` 无法解析」让用户困惑。
+                // 现在 None → fail-loud 明示「未提供 base 字段」,引导用户用 gh pr view
+                // 动态填(see templates/mr-review-loop.yaml 的 base-detect step)。
+                let b = match base {
+                    Some(b) => b,
+                    None => {
+                        return Err(EngineError::Cli(
+                            "review-mr 必须提供 base 字段(目标分支名)。模板里通常用 \
+                             `base: \"{{base-detect.artifact}}\"` 让 claude step 跑 \
+                             `gh pr view <MR-URL> --json baseRefName -q .baseRefName` 动态\
+                             解析,或直接写死为该 MR 的真实目标分支(如 main / master)。"
+                                .into(),
+                        ));
+                    }
+                };
                 // base ref 预检:review-mr 审的是 `git diff {b}...HEAD`。若 {b} 在目标仓库
                 // 不可解析(分支名配错 / 仓库未 fetch 到该分支),codex 跑 diff 必然失败,
                 // 只能把"没法审"返回成 changes_requested。引擎若信任该 verdict 喂回 loop,
@@ -201,12 +217,19 @@ impl CodexRunner {
 /// 同一套 gitrevisions 规则(裸 ref,不做 `origin/` DWIM);`^{commit}` 确保解析到 commit-ish。
 /// git 不可用 / 非 git 仓库 / ref 不存在一律返回 false → 调用方 fail-loud(绝不静默放过)。
 ///
-/// 安全:`base` 以 `-` 开头时,若不带分隔符直接喂给 git rev-parse 会被当成 git 选项
-/// (如 `--help` 让 git 退出 0 印帮助;`--exec=cmd` 类 CVE 输入更危险),误判 ref 存在。
-/// 双层防御:① 字面 reject 以 `-` 开头的 base;② `--end-of-options`(git 2.24+,2019)
-/// 强制告诉 rev-parse 后续 args 一律是 refs 不是选项,即便未来引入新选项也不混淆。
+/// 安全 + 容损(双层防御:① 字面 reject ② `--end-of-options` 强制后续 args 一律是 refs):
+/// - `base` 以 `-` 开头:被当 git 选项(`--help` 退 0 印帮助;`--exec=` CVE 输入)。
+/// - `base` 含空白 / 控制字符:多半是 LLM artifact 解析漂移(带换行 / 全角空格 /
+///   markdown 代码块标记),让 rev-parse 喂到任何含空白的 ref 都必然失败,且错误
+///   信息含原始字符让用户更难定位。这里 fail-loud 拒掉,引导上层 trim(executor 已 trim
+///   首行,这条是兜底)。
+///
+/// `--end-of-options` 是 git 2.24+(2019),即便未来引入新选项也不混淆。
 fn base_ref_resolvable(cwd: &Path, base: &str) -> bool {
     if base.starts_with('-') {
+        return false;
+    }
+    if base.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return false;
     }
     std::process::Command::new("git")

@@ -192,6 +192,10 @@ function StepLine({
   const running = st.status === "Running";
   // 运行中:折叠态显示最近进度行(尚无 summary);终态:显示 summary/error
   const main = running ? st.lastLine ?? "" : st.summary ?? st.error ?? "";
+  // 有 error(Failed 或 决策门暂停中的失败 step)时不截断:base ref guard / budget
+  // 等 fail-loud 信息常含完整修复建议,被 ellipsis 截到「在…」就废了。换行多 + 行
+  // 高有限,长文也只占两三行,可控。
+  const showFull = !!st.error;
   const lines = st.lines ?? [];
   const hasLines = lines.length > 0;
   const feedRef = useRef<HTMLDivElement>(null);
@@ -214,7 +218,7 @@ function StepLine({
         <span className="mark">{MARK[st.status]}</span>
         <span className="cid">{id}</span>
         {running && st.round != null && <span className="cline-round">第 {st.round} 轮</span>}
-        <span className="cline-main">{main}</span>
+        <span className={`cline-main${showFull ? " cline-main-full" : ""}`} title={main}>{main}</span>
         {st.metrics && <span className="cline-metrics">{fmtMetrics(st.metrics)}</span>}
         {running && st.startedAt != null && (
           <span className="cline-timer">{fmtElapsed(now - st.startedAt)}</span>

@@ -10,6 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
+/// review prompt 共用尾巴:要求 reviewer 为每个 finding 给具体可执行 suggestion。
+/// 两处 prompt 共用,避免漂移(spec §3.2)。
+const SUGGESTION_HINT: &str = "。每个 finding 必须提供 suggestion 字段:具体可执行的修改建议(例:'第 42 行 nil 检查改成 if let Some(x) = y { ... }' / '把 unwrap 改为 ? 传播');无具体建议则填 \"N/A\"";
+
 /// codex review 单次墙钟上限(秒)。挂死 / provider 失联时到点 kill 整组,
 /// review() 返回 Err 走 step 失败决策门,绝不冻住整个 run。可经
 /// `AGENTPIPE_CODEX_TIMEOUT_SECS` 覆盖(>0 生效)。
@@ -39,6 +43,10 @@ struct RawFinding {
     line: i64,
     #[serde(default)]
     summary: String,
+    /// 具体修改建议(spec §3.2),提升下游 fixer 的可操作性。
+    /// 旧 codex 二进制 / 旧 fixture 无此字段时 serde 给空串,渲染时按"无建议"处理。
+    #[serde(default)]
+    suggestion: String,
 }
 
 impl CodexRunner {
@@ -102,7 +110,7 @@ impl CodexRunner {
                         "-o".into(),
                         out_str.clone(),
                         format!(
-                            "审查当前工作区相对 `{b}` 分支的代码改动(查看 git diff {b}...HEAD 以及未提交改动),按 schema 输出 verdict(clean 或 changes_requested)和 findings"
+                            "审查当前工作区相对 `{b}` 分支的代码改动(查看 git diff {b}...HEAD 以及未提交改动),按 schema 输出 verdict(clean 或 changes_requested)和 findings{SUGGESTION_HINT}"
                         ),
                     ],
                     None,
@@ -120,7 +128,9 @@ impl CodexRunner {
                         schema.clone(),
                         "-o".into(),
                         out_str.clone(),
-                        format!("审查随附设计文档 {rel} 并按 schema 输出 verdict/findings"),
+                        format!(
+                            "审查随附设计文档 {rel} 并按 schema 输出 verdict/findings{SUGGESTION_HINT}"
+                        ),
                     ],
                     Some(content),
                 )
@@ -182,6 +192,8 @@ fn base_ref_resolvable(cwd: &Path, base: &str) -> bool {
 }
 
 /// RawReview → ReviewResult(verdict 归一 + findings 扁平化)。解析两路共用,避免漂移。
+/// suggestion 非空且非占位("N/A" 大小写不敏感)时追加 ↳ 行,让下游 fixer prompt 直接看到
+/// 可操作的具体建议(spec §3.2 反馈深度提升)。
 fn raw_to_result(raw: RawReview) -> ReviewResult {
     let verdict = if raw.verdict == "clean" {
         Verdict::Clean
@@ -191,7 +203,15 @@ fn raw_to_result(raw: RawReview) -> ReviewResult {
     let findings = raw
         .findings
         .iter()
-        .map(|f| format!("[{}] {}:{} {}", f.severity, f.file, f.line, f.summary))
+        .map(|f| {
+            let head = format!("[{}] {}:{} {}", f.severity, f.file, f.line, f.summary);
+            let s = f.suggestion.trim();
+            if s.is_empty() || s.eq_ignore_ascii_case("n/a") {
+                head
+            } else {
+                format!("{head}\n  ↳ 建议: {s}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     ReviewResult { verdict, findings }
@@ -239,6 +259,10 @@ fn parse_review(out_file: &Path) -> ReviewResult {
 
 // 必须是严格 JSON Schema:OpenAI 结构化输出要求每个 object 带 additionalProperties:false
 // 且所有属性进 required,否则 API 报 invalid_json_schema(实测,见 cli-behavior-findings.md)。
+//
+// suggestion 字段(spec §3.2):要求 reviewer 为每个 finding 给具体修改建议(无则填 "N/A")。
+// 提升下游 fixer 反馈深度。旧 codex 二进制不识别此字段时 OpenAI 端可能 reject;若发现
+// 真实兼容问题,fallback 路径(parse_review)走 ChangesRequested + 占位 findings 不假成功。
 const REVIEW_SCHEMA: &str = r#"{
   "type":"object","additionalProperties":false,
   "required":["verdict","findings"],
@@ -246,9 +270,10 @@ const REVIEW_SCHEMA: &str = r#"{
     "verdict":{"type":"string","enum":["clean","changes_requested"]},
     "findings":{"type":"array","items":{
       "type":"object","additionalProperties":false,
-      "required":["severity","file","line","summary"],
+      "required":["severity","file","line","summary","suggestion"],
       "properties":{
         "severity":{"type":"string"},"file":{"type":"string"},
-        "line":{"type":"integer"},"summary":{"type":"string"}}}}
+        "line":{"type":"integer"},"summary":{"type":"string"},
+        "suggestion":{"type":"string"}}}}
   }
 }"#;

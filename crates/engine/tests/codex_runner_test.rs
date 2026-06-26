@@ -97,3 +97,51 @@ fn unparseable_output_is_changes_requested() {
         .unwrap();
     assert_eq!(r.verdict, Verdict::ChangesRequested);
 }
+
+#[test]
+fn renders_suggestion_when_present_and_skips_na_placeholder() {
+    // spec §3.2:reviewer 给出具体可执行 suggestion 时,渲染出 "↳ 建议:" 行;
+    // suggestion 为 "N/A" 占位(或大小写变体)则不渲染,避免噪音。
+    let r = CodexRunner::new(fixture("stub-codex-with-suggestion.sh"))
+        .review(
+            &CodexAction::ReviewMr,
+            None,
+            Some("HEAD"),
+            None,
+            None,
+            &mut |_: &str, _: Option<u32>| {},
+            &PathBuf::from("."),
+        )
+        .expect("review ok");
+    assert_eq!(r.verdict, Verdict::ChangesRequested);
+    // 第一个 finding 带具体 suggestion → 必须有 ↳ 行
+    assert!(
+        r.findings.contains("↳ 建议: 第 10 行加"),
+        "应渲染具体 suggestion: {}",
+        r.findings
+    );
+    // 第二个 finding suggestion="N/A" → 不应渲染 ↳ 行
+    let na_lines = r
+        .findings
+        .lines()
+        .filter(|l| l.contains("N/A"))
+        .count();
+    assert_eq!(na_lines, 0, "N/A 占位不应渲染: {}", r.findings);
+}
+
+#[test]
+fn legacy_finding_without_suggestion_field_still_parses() {
+    // 旧 fixture(stub-codex.sh)输出不含 suggestion 字段;serde default 给空串,
+    // 渲染时按"无建议"跳过 ↳ 行,保持向后兼容。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("STUB_VERDICT", "changes_requested");
+    let r = stub()
+        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
+        .expect("review ok");
+    assert!(r.findings.contains("示例问题"), "legacy 字段应正常解析");
+    assert!(
+        !r.findings.contains("↳"),
+        "无 suggestion 字段时不应有 ↳ 行: {}",
+        r.findings
+    );
+}

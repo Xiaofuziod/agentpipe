@@ -504,3 +504,51 @@ steps:
         "空预置值应回退到人工 gate"
     );
 }
+
+#[test]
+fn budget_exceeded_aborts_run_at_first_overrun() {
+    // stub-claude 每步 cost_usd = 0.01。budget = 0.005 < 0.01 → 第 1 个 claude step 完成后
+    // 累计 0.01 > 0.005 触发 over_budget,emit StepFailed + RunFinished{Aborted},第 2 步不跑。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("STUB_VERDICT", "clean");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+budget_usd: 0.005
+steps:
+  - id: first
+    kind: claude
+    prompt: "step1"
+  - id: second
+    kind: claude
+    prompt: "step2"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    assert!(m.validate().is_ok());
+    let (etx, erx) = mpsc::channel();
+    let (_ctx, crx) = mpsc::channel::<Command>();
+
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+
+    assert_eq!(status, RunStatus::Aborted, "超 budget 应走 Aborted,不是 Failed");
+    let events: Vec<Event> = erx.try_iter().collect();
+
+    // 第 1 步必须 finished;第 2 步必须没启动(over_budget 在第 1 步 finish 后立即停)
+    let finished_first = events.iter().any(
+        |e| matches!(e, Event::StepFinished { step_id, status, .. } if step_id == "first" && *status == StepStatus::Done),
+    );
+    assert!(finished_first, "第 1 步必须正常 finish");
+    let started_second = events
+        .iter()
+        .any(|e| matches!(e, Event::StepStarted { step_id, .. } if step_id == "second"));
+    assert!(!started_second, "第 2 步不该启动,实际事件: {events:?}");
+
+    // budget 错误必须有解释性 StepFailed
+    let budget_err = events.iter().any(|e| {
+        matches!(e, Event::StepFailed { error, .. } if error.contains("超出 USD budget"))
+    });
+    assert!(budget_err, "应 emit 含 '超出 USD budget' 的 StepFailed 事件");
+}

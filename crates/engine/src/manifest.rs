@@ -13,6 +13,11 @@ pub struct Manifest {
     /// 关闭时不序列化,保持现存模板 / YAML diff 干净;缺字段默认 false(向后兼容)。
     #[serde(default, skip_serializing_if = "is_false")]
     pub worktree: bool,
+    /// per-run USD 总额上限(累计 step 的 cost_usd,超过即 fail-loud 中止)。
+    /// 省略(None) = 无限制,保持向后兼容;> 0 才生效,validate 拒非正数。
+    /// 见 docs/specs/2026-06-26-review-loop-budget-and-verdict-design.md §3.1。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
     pub steps: Vec<Step>,
 }
 
@@ -158,6 +163,14 @@ impl Manifest {
     }
 
     pub fn validate(&self) -> Result<(), EngineError> {
+        if let Some(b) = self.budget_usd {
+            // NaN / 负数 / 0 都无意义(0 = 任何 step 完成就触发,无法跑);用 is_finite 防 inf/NaN 误配。
+            if !b.is_finite() || b <= 0.0 {
+                return Err(EngineError::Validation(format!(
+                    "budget_usd 必须为正有限数,实际 {b}"
+                )));
+            }
+        }
         for step in &self.steps {
             Self::validate_step(step)?;
         }
@@ -326,6 +339,37 @@ mod tests {
         let y = "version: 1\nname: t\ntarget: /tmp\nworktree: true\nsteps: []\n";
         let m = Manifest::parse(y).unwrap();
         assert!(m.worktree);
+    }
+
+    #[test]
+    fn budget_usd_parses_and_validates() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nsteps: []\n";
+        let m = Manifest::parse(y).unwrap();
+        assert_eq!(m.budget_usd, Some(5.0));
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn budget_usd_rejects_non_positive() {
+        for bad in &[0.0_f64, -1.5, f64::INFINITY, f64::NAN] {
+            let y = format!("version: 1\nname: t\ntarget: /tmp\nbudget_usd: {bad}\nsteps: []\n");
+            let parsed = Manifest::parse(&y);
+            // NaN/inf 在 YAML 数字解析可能直接失败,也可能 parse 成 f64 特殊值;两条路径都不该被
+            // 当成有效预算放过去。所以这里允许 parse 失败,也接受 validate 拒绝。
+            if let Ok(m) = parsed {
+                assert!(
+                    m.validate().is_err(),
+                    "budget_usd={bad} 应被拒绝(parse 成功)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn budget_usd_absent_not_serialized() {
+        let m = Manifest::parse("version: 1\nname: t\ntarget: /tmp\nsteps: []\n").unwrap();
+        let y = serde_yml::to_string(&m).unwrap();
+        assert!(!y.contains("budget_usd"), "无 budget 时不应序列化:\n{y}");
     }
 
     #[test]

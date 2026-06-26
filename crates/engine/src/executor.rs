@@ -255,6 +255,10 @@ impl Executor {
                         artifact: Some(answer.clone()),
                         ..Default::default()
                     });
+                    // 用户裁决(2026-06-26):每轮 fix 也要看详情。把 claude answer 文本
+                    // 追发到 progress,UI 展开 step 输出能看到本轮干活的最终回答 / 修复说明。
+                    // 截断 30 行兜底防长 answer 撑爆面板。
+                    emit_answer_preview(&answer, &mut on_line);
 
                     // 无校验门 → 退出码即完成(原行为)
                     let v = match verify {
@@ -611,6 +615,8 @@ impl Executor {
         false // 没找到 codex step → fail-closed 不收敛
     }
 
+    // (helper 见文件末 emit_answer_preview)
+
     /// 标识符类字段(分支名 / 文件路径 / 其他 git ref / shell-safe 名)的插值归一:
     /// `{{xxx.artifact}}` 解析结果常带前后空白 / 多行 / 末尾换行(LLM 即使被指令
     /// 「只输出 X」也未必严格遵守)。取首行非空 trim 后字符串;空 → None 让下游
@@ -727,6 +733,32 @@ impl Executor {
             error,
             metrics,
         });
+    }
+}
+
+/// 把 claude attempt 的 answer 文本追发到 progress sink:让 UI 展开 step 输出能看到
+/// 本轮干活的最终回答 / 修复说明,而不只是「调用 Bash / 调用 Edit / 思考中」类标签。
+/// 用户裁决(2026-06-26):每轮 review/fix 要看详情。
+///
+/// 截断 30 行兜底:实现 step 经常输出几千字,完整 emit 会让 UI 渲染抖动 + 内存压力。
+/// 用户想看完整 answer 走 audit NDJSON / 下游 step 的 `{{xxx.artifact}}` 插值。
+fn emit_answer_preview(answer: &str, on_line: &mut dyn FnMut(&str, Option<u32>)) {
+    let trimmed = answer.trim();
+    if trimmed.is_empty() {
+        on_line("─── 完成 · (无文本输出) ───", None);
+        return;
+    }
+    on_line("─── 完成 · 输出 ───", None);
+    let total = trimmed.lines().count();
+    const PREVIEW_LINES: usize = 30;
+    for line in trimmed.lines().take(PREVIEW_LINES) {
+        on_line(line, None);
+    }
+    if total > PREVIEW_LINES {
+        on_line(
+            &format!("…(还有 {} 行,完整内容见审计 NDJSON / 下游插值)", total - PREVIEW_LINES),
+            None,
+        );
     }
 }
 

@@ -209,7 +209,44 @@ impl CodexRunner {
         // 真实 codex(v0.139.0)把最终结构化结果打到 stdout、不写 -o(--output-last-message)文件。
         // 故 stdout 优先:取最后一条能解析成 schema 的 JSON 行;读 -o 文件作 fallback
         // (stub / 旧 codex 路径,parse_review 自带"无法解析"兜底)。
-        Ok(parse_review_stdout(&stdout).unwrap_or_else(|| parse_review(&out_file)))
+        let result = parse_review_stdout(&stdout).unwrap_or_else(|| parse_review(&out_file));
+
+        // 用户裁决(2026-06-26):review/fix 每轮要看到详情。把结构化 verdict + 渲染好
+        // 的 findings 作为 progress 行追发,UI 展开 step 输出就能直接看到完整审查结果
+        // (而非埋在原始 stdout 的 JSON 末行里)。
+        emit_findings_summary(&result, &mut |line| on_progress(line, None));
+
+        Ok(result)
+    }
+}
+
+/// 把 ReviewResult 用人读形式追发到 on_progress:一行 verdict 摘要 + 每条 finding
+/// 单独一行(含 ↳ 建议)。让 UI 展开 step 进度就能看到全部审查内容,不必去翻 audit
+/// NDJSON 或 artifact 插值才能拿到 findings。
+fn emit_findings_summary(result: &ReviewResult, on_line: &mut dyn FnMut(&str)) {
+    let verdict_tag = match result.verdict {
+        Verdict::Clean => "✓ 审查通过",
+        Verdict::ChangesRequested => "⚑ 待修复",
+    };
+    let findings_trim = result.findings.trim();
+    if findings_trim.is_empty() {
+        on_line(&format!("─── {verdict_tag} ───"));
+        return;
+    }
+    let count = findings_trim
+        .lines()
+        .filter(|l| l.starts_with('['))
+        .count();
+    let header = if count > 0 {
+        format!("─── {verdict_tag} · {count} 条 finding ───")
+    } else {
+        format!("─── {verdict_tag} ───")
+    };
+    on_line(&header);
+    for line in findings_trim.lines() {
+        if !line.trim().is_empty() {
+            on_line(line);
+        }
     }
 }
 

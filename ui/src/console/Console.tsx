@@ -33,10 +33,9 @@ function fmtElapsed(ms: number): string {
   return `${Math.floor(s / 60)}:${ss}`;
 }
 
-function fmtMetrics(m: { num_turns: number; duration_ms: number; cost_usd: number }): string {
+function fmtMetrics(m: { num_turns: number; duration_ms: number }): string {
   const secs = (m.duration_ms / 1000).toFixed(1);
-  const cost = m.cost_usd > 0 ? ` · $${m.cost_usd.toFixed(2)}` : "";
-  return `${m.num_turns} 轮 · ${secs}s${cost}`;
+  return `${m.num_turns} 轮 · ${secs}s`;
 }
 
 /** 快跑栏的项目下拉项 */

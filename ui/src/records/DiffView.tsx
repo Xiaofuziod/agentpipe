@@ -1,10 +1,13 @@
 import type { DiffRow } from "../types";
 
-/** 纯函数:把一行 DiffRow 转成可读文案(单测覆盖)。 */
+/** 纯函数:把一行 DiffRow 转成可读文案(单测覆盖)。
+ *
+ * 应用内不展示 USD 计费(用户裁决,2026-06-26):只 diff 状态变化,cost 字段
+ * 仍由后端提供但 UI 不渲染。后端 audit / CLI cost 子命令仍保留账目。 */
 export function diffRowText(r: DiffRow): string {
   if (r.kind === "only_a") return `- ${r.step_id}: 仅 A (${r.a_status})`;
   if (r.kind === "only_b") return `+ ${r.step_id}: 仅 B (${r.b_status})`;
-  return `~ ${r.step_id}: ${r.a_status} $${(r.a_cost ?? 0).toFixed(2)} → ${r.b_status} $${(r.b_cost ?? 0).toFixed(2)}`;
+  return `~ ${r.step_id}: ${r.a_status} → ${r.b_status}`;
 }
 
 /**

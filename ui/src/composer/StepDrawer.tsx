@@ -182,6 +182,40 @@ function Fields({
       );
     case "loop":
       return <LoopBody step={step} depth={depth} onChange={onChange} />;
+    case "acp":
+      return (
+        <>
+          <div className="field">
+            <label className="label">agent</label>
+            <input
+              className="input input-mono"
+              placeholder="gemini / claude-acp / codex-acp"
+              value={step.agent}
+              onChange={(e) => onChange({ ...step, agent: e.target.value })}
+            />
+            <div className="hint">显示用名称(日志 / UI 标签)。</div>
+          </div>
+          <div className="field">
+            <label className="label">command</label>
+            <input
+              className="input input-mono"
+              placeholder="npx @agentclientprotocol/claude-agent-acp"
+              value={step.command}
+              onChange={(e) => onChange({ ...step, command: e.target.value })}
+            />
+            <div className="hint">启动 ACP server 的完整命令(shell-words 切分)。</div>
+          </div>
+          <div className="field">
+            <label className="label">prompt</label>
+            <textarea
+              className="textarea"
+              placeholder="给 ACP agent 的指令…"
+              value={step.prompt}
+              onChange={(e) => onChange({ ...step, prompt: e.target.value })}
+            />
+          </div>
+        </>
+      );
   }
 }
 

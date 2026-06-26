@@ -1,5 +1,5 @@
 use agentpipe_engine::manifest::{Step, StepKind};
-use agentpipe_engine::protocol::{Event, StepStatus};
+use agentpipe_engine::protocol::{Event, LoopEndReason, StepStatus};
 
 /// dry-run:把一个 step 渲染成一行计划。纯函数。
 pub fn render_plan_step(step: &Step) -> String {
@@ -11,6 +11,7 @@ pub fn render_plan_step(step: &Step) -> String {
         }
         StepKind::Codex { action, .. } => format!("codex {action:?}"),
         StepKind::Human { .. } => "human".into(),
+        StepKind::Acp { agent, .. } => format!("acp {agent}"),
         StepKind::Loop { until, max, body } => {
             format!("loop until={until} max={max} ({} steps)", body.len())
         }
@@ -41,12 +42,20 @@ pub fn render_event(event: &Event) -> String {
                 .unwrap_or_default();
             format!("  {mark} {step_id}: {summary}{m}")
         }
-        Event::StepFailed { step_id, error } => format!("  ✗ {step_id}: {error}"),
+        Event::StepFailed { step_id, error, .. } => format!("  ✗ {step_id}: {error}"),
         Event::WorktreeReady { path, branch } => format!("  ⑂ worktree: {branch} @ {path}"),
         Event::WorktreeFailed { error } => format!("  ✗ worktree failed: {error}"),
         Event::LoopIteration { loop_id, iteration } => format!("  ↻ {loop_id} round {iteration}"),
         Event::LoopConverged { loop_id, iterations } => format!("  ✓ {loop_id} converged in {iterations} round(s)"),
-        Event::LoopMaxReached { loop_id, max } => format!("  ⚠ {loop_id} hit max {max}, still not clean"),
+        Event::LoopMaxReached { loop_id, max, reason } => match reason {
+            LoopEndReason::MaxReached => {
+                format!("  ⚠ {loop_id} hit max {max}, still not clean")
+            }
+            LoopEndReason::Aborted => format!("  ⏹ {loop_id} aborted at round {max}"),
+            LoopEndReason::SubStepFailed => {
+                format!("  ✗ {loop_id} stopped at round {max} (sub-step failed)")
+            }
+        },
         Event::StepAwaitingGate { step_id, suggestion, .. } => format!("  ⏸ {step_id}: {suggestion}"),
         Event::RunFinished { status } => format!("■ Done: {status:?}"),
     }

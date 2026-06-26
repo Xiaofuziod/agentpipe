@@ -25,6 +25,11 @@ steps:
   - id: self-review
     kind: claude
     prompt: "对刚才的改动先跑 /code-review 修复发现的问题,再跑 /simplify 优化,然后提交到 MR"
+  # 动态解析刚刚 implement 创建的 MR 的目标分支(base);避免写死 dev / main 与项目
+  # 实际默认分支不一致(见 mr-review-loop 同形 base step 设计)。
+  - id: base
+    kind: claude
+    prompt: "执行 `gh pr view {{implement.artifact}} --json baseRefName -q .baseRefName` 解析 MR {{implement.artifact}} 的 base 分支。失败时回退 `git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@'`。**只输出 base 分支名,不要 markdown / 代码块 / 多余文字**。"
   - id: codex-loop
     kind: loop
     until: codex-clean
@@ -33,7 +38,7 @@ steps:
       - id: codex-review-mr
         kind: codex
         action: review-mr
-        base: dev
+        base: "{{base.artifact}}"  # 由上方 base step 从 MR 元信息动态解析
       - id: apply-feedback
         kind: claude
         prompt: "按 Codex 反馈修改并提交:{{codex-review-mr.findings}}"

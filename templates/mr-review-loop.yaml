@@ -4,6 +4,9 @@ name: "MR 审查-修复循环"
 target: <目标仓库绝对路径>
 # auto:除人工步骤外自动跑,审查-修复循环无需逐步批准
 mode: auto
+# (可选)per-run USD 上限,累计超出 fail-loud 终止;省略 = 无限。审查循环易跑飞,
+# 强烈建议设。docs/specs/2026-06-25-review-loop-budget-and-verdict-design.md
+# budget_usd: 10.0
 steps:
   # 1. 输入要审查的 MR 链接(在批准对话框的「产物」框里粘贴链接)
   - id: mr
@@ -17,6 +20,14 @@ steps:
     kind: claude
     prompt: "把 target 仓库切到 MR {{mr.artifact}} 对应的分支:优先 `gh pr checkout {{mr.artifact}}`,失败则从链接解析出分支名,用 git fetch + git checkout 切过去。完成后只输出当前分支名。"
 
+  # 动态解析该 MR 的目标分支(base):codex review-mr 需要知道 `git diff base...HEAD` 的
+  # 起点,而 MR 的真实 base 因仓库而异(main / master / dev / release-x …)。让 claude
+  # 用 gh CLI 取 MR 元信息里的 baseRefName,artifact 就是 base 分支名,review 步骤
+  # 插值用即可(下方 review.base: "{{base.artifact}}")。
+  - id: base
+    kind: claude
+    prompt: "执行 `gh pr view {{mr.artifact}} --json baseRefName -q .baseRefName` 解析 MR {{mr.artifact}} 的 base(目标)分支。失败时回退 `git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@'` 取仓库默认分支。**只输出 base 分支名,不要 markdown / 代码块 / 多余文字**。"
+
   # 2~5. codex 审 MR → claude 按反馈修复并 push → 再审,循环直到 codex 判定干净。
   # 循环每轮跑完 body(审 + 改)后判定 until:review 的 verdict=clean 即收敛退出。
   - id: review-fix
@@ -28,7 +39,7 @@ steps:
       - id: review
         kind: codex
         action: review-mr
-        base: dev           # ← 改成该 MR 的目标分支(main / dev / master …)
+        base: "{{base.artifact}}"  # 由上方 base step 从 MR 元信息动态解析,无需写死
 
       # 3 / 5. 把 Codex 找到的问题交给 Claude 修复并提交回该 MR 分支
       - id: fix

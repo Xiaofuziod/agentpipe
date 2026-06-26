@@ -1095,6 +1095,14 @@ body {
   white-space: nowrap;
   text-overflow: ellipsis;
 }
+/* 带 error 的行(fail-loud / 暂停态)不截断:base ref / budget 类完整修复建议
+   被截到「在…」用户就抓瞎了。换行 + word-break 让 CJK 长串也能折回。 */
+.console-line .cline-main.cline-main-full {
+  white-space: normal;
+  word-break: break-word;
+  overflow: visible;
+  text-overflow: clip;
+}
 /* 运行中 step 的实时秒表 */
 .console-line .cline-timer {
   flex-shrink: 0;

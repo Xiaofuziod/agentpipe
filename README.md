@@ -115,7 +115,7 @@ Every run is appended as NDJSON to `~/.agentpipe/runs/<run-id>.ndjson` (run-id i
 | Linux    | should work (unix paths; same code paths as macOS) | should work (untested) |
 | Windows  | compiles (unix-only `libc`/process-group code is `cfg`-gated, with fallbacks); untested | Tauri is cross-platform; untested |
 
-CI builds and tests on Linux + macOS and build-checks Windows. Reports of breakage on Linux/Windows are welcome.
+Verified locally on macOS via `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`. Reports of breakage on Linux/Windows are welcome.
 
 ## Adapting to other agents
 

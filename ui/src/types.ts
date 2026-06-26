@@ -19,10 +19,11 @@ export type StepKind =
   | { kind: "claude"; prompt: string; skill?: string; verify?: Verify }
   | { kind: "codex"; action: CodexAction; path?: string; base?: string; prompt?: string }
   | { kind: "human"; instruction: string; expects?: string; value?: string }
-  | { kind: "loop"; until: "codex-clean"; max: number; body: Step[] };
+  | { kind: "loop"; until: "codex-clean"; max: number; body: Step[] }
+  | { kind: "acp"; agent: string; command: string; prompt: string };
 
 export type Step = { id: string } & StepKind;
-export type Manifest = { version: 1; name: string; target: string; mode: RunMode; worktree?: boolean; steps: Step[] };
+export type Manifest = { version: 1; name: string; target: string; mode: RunMode; worktree?: boolean; budget_usd?: number | null; steps: Step[] };
 
 export type GateKind = "step" | "human" | "decision";
 export type StepStatus = "Pending" | "Running" | "AwaitingGate" | "Done" | "Failed" | "Skipped";
@@ -31,18 +32,23 @@ export type RunStatus = "Success" | "Failed" | "Aborted";
 // 与 crates/engine/src/protocol.rs 的 StepMetrics 手工镜像同步
 export type StepMetrics = { num_turns: number; duration_ms: number; cost_usd: number };
 
+// Loop 终止原因(review §A finding #15):区分自然 max / 外部中止 / sub-step 失败,
+// 渲染层按 reason 出不同文案,而非旧版统一的「hit max, still not clean」误导文本。
+// 老审计日志不含 reason → 后端 serde default 回退 max_reached,前端解析时也要兜底。
+export type LoopEndReason = "max_reached" | "aborted" | "sub_step_failed";
+
 export type EngineEvent =
   | { type: "RunStarted"; name: string; target?: string }
   | { type: "StepStarted"; step_id: string; kind: string }
   | { type: "StepProgress"; step_id: string; line: string; round?: number | null }
   | { type: "StepAwaitingGate"; step_id: string; suggestion: string; expects_artifact: boolean; gate_kind: GateKind }
   | { type: "StepFinished"; step_id: string; status: StepStatus; summary: string; metrics?: StepMetrics | null }
-  | { type: "StepFailed"; step_id: string; error: string }
+  | { type: "StepFailed"; step_id: string; error: string; metrics?: StepMetrics | null }
   | { type: "WorktreeReady"; path: string; branch: string }
   | { type: "WorktreeFailed"; error: string }
   | { type: "LoopIteration"; loop_id: string; iteration: number }
   | { type: "LoopConverged"; loop_id: string; iterations: number }
-  | { type: "LoopMaxReached"; loop_id: string; max: number }
+  | { type: "LoopMaxReached"; loop_id: string; max: number; reason?: LoopEndReason }
   | { type: "RunFinished"; status: RunStatus };
 
 export type EngineCommand =

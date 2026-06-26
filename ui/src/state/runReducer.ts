@@ -123,8 +123,19 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
       return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iteration } } };
     case "LoopConverged":
       return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iterations, result: "收敛" } } };
-    case "LoopMaxReached":
-      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.max, result: "到上限未干净" } } };
+    case "LoopMaxReached": {
+      // review §A finding #15:按 reason 分三档文案,旧版统一「到上限未干净」会把
+      // 外部 Abort 与 sub-step 失败误报成「跑到 max」(iteration=0 时尤其无意义)。
+      // 老审计日志无 reason → 兜底 max_reached(与后端 serde default 同形)。
+      const reason = e.reason ?? "max_reached";
+      const text =
+        reason === "aborted"
+          ? "已中止"
+          : reason === "sub_step_failed"
+          ? "子步骤失败"
+          : "到上限未干净";
+      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.max, result: text } } };
+    }
     case "RunFinished":
       return { ...prev, runStatus: e.status, activeGate: null, log: pushLog(prev.log, `■ ${e.status}`) };
     default:

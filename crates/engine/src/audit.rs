@@ -150,7 +150,17 @@ pub struct CostSummary {
 pub fn aggregate_cost(entries: &[RunEntry]) -> CostSummary {
     let mut s = CostSummary::default();
     for e in entries {
-        if let Event::StepFinished { step_id, metrics: Some(m), .. } = &e.event {
+        // review §A finding #4:StepFinished 与 StepFailed 都可能携带 cumulative
+        // metrics(budget 触发 / OnUnmet::Fail 路径,验过的累积 cost 走 StepFailed
+        // 出去)。两类终态互斥(一个 step 只走一条),累加不重复计 — 旧版只看
+        // StepFinished 让 budget-aborted run 总成本永远 $0,与 ctx.cost_so_far_usd
+        // 真实账目脱节。
+        let payload = match &e.event {
+            Event::StepFinished { step_id, metrics: Some(m), .. } => Some((step_id, m)),
+            Event::StepFailed { step_id, metrics: Some(m), .. } => Some((step_id, m)),
+            _ => None,
+        };
+        if let Some((step_id, m)) = payload {
             s.total_cost_usd += m.cost_usd;
             s.total_turns += m.num_turns;
             s.total_duration_ms += m.duration_ms;
@@ -168,12 +178,22 @@ pub struct StepFinal {
 }
 
 /// 按 step_id 提取每步终态。供 CLI diff 与 GUI diff_runs 共用(单一来源)。
+/// StepFailed 也是终态(与 StepFinished 互斥),携带 budget 触发 / OnUnmet::Fail
+/// 累积 cost — review §A finding #4 后纳入,避免失败步骤在 diff 视图永远显示
+/// 0 cost 与 audit 总计脱节。
 pub fn step_finals(entries: &[RunEntry]) -> std::collections::BTreeMap<String, StepFinal> {
     let mut m = std::collections::BTreeMap::new();
     for e in entries {
-        if let Event::StepFinished { step_id, status, metrics, .. } = &e.event {
-            let cost_usd = metrics.as_ref().map(|x| x.cost_usd).unwrap_or(0.0);
-            m.insert(step_id.clone(), StepFinal { status: format!("{status:?}"), cost_usd });
+        match &e.event {
+            Event::StepFinished { step_id, status, metrics, .. } => {
+                let cost_usd = metrics.as_ref().map(|x| x.cost_usd).unwrap_or(0.0);
+                m.insert(step_id.clone(), StepFinal { status: format!("{status:?}"), cost_usd });
+            }
+            Event::StepFailed { step_id, metrics, .. } => {
+                let cost_usd = metrics.as_ref().map(|x| x.cost_usd).unwrap_or(0.0);
+                m.insert(step_id.clone(), StepFinal { status: "Failed".into(), cost_usd });
+            }
+            _ => {}
         }
     }
     m
@@ -291,7 +311,7 @@ mod tests {
 
     #[test]
     fn event_json_line_has_ts_and_event() {
-        let line = event_json_line(&Event::StepFailed { step_id: "x".into(), error: "boom".into() });
+        let line = event_json_line(&Event::StepFailed { step_id: "x".into(), error: "boom".into(), metrics: None });
         let v: serde_json::Value = serde_json::from_str(&line).unwrap();
         assert_eq!(v["event"]["type"], "StepFailed");
         assert_eq!(v["event"]["error"], "boom");

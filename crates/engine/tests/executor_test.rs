@@ -573,7 +573,7 @@ steps:
 
     // budget 错误必须有解释性 StepFailed,且 step_id = "first"
     let budget_err = events.iter().any(|e| {
-        matches!(e, Event::StepFailed { step_id, error } if step_id == "first" && error.contains("超出 USD budget"))
+        matches!(e, Event::StepFailed { step_id, error, .. } if step_id == "first" && error.contains("超出 USD budget"))
     });
     assert!(budget_err, "应 emit 含 '超出 USD budget' 的 StepFailed 事件: {events:?}");
 
@@ -667,10 +667,112 @@ steps:
     assert_eq!(status, RunStatus::Aborted, "verify-retry 中段触发 budget 应 Aborted");
     let events: Vec<Event> = erx.try_iter().collect();
     let budget_err = events.iter().any(|e| {
-        matches!(e, Event::StepFailed { step_id, error } if step_id == "do" && error.contains("超出 USD budget"))
+        matches!(e, Event::StepFailed { step_id, error, .. } if step_id == "do" && error.contains("超出 USD budget"))
     });
     assert!(
         budget_err,
         "verify-retry 中段必须能触发 budget StepFailed(否则 verifier/retry cost 全漏): {events:?}"
     );
+    // review §A finding #4 守护:budget 触发的 StepFailed 必须携带 cumulative metrics,
+    // 让 audit::aggregate_cost 能正确合计失败 step 的真实花费(旧版 StepFailed 无 metrics
+    // 字段,audit 总成本永远 $0,与 ctx.cost_so_far_usd 真实账目脱节)。
+    let metrics_in_failed = events.iter().find_map(|e| match e {
+        Event::StepFailed { step_id, metrics: Some(m), error, .. }
+            if step_id == "do" && error.contains("超出 USD budget") =>
+        {
+            Some(m.clone())
+        }
+        _ => None,
+    });
+    let m = metrics_in_failed
+        .expect("budget StepFailed 必须携带 cumulative metrics(review §A finding #4)");
+    // 触发时已经至少 charge 了 ≥ budget(0.045)的累积成本,且每次单位 0.01。
+    assert!(
+        m.cost_usd >= 0.045,
+        "StepFailed.metrics 应反映 cumulative 而非单次,期望 ≥ 0.045,实际 {}",
+        m.cost_usd
+    );
+}
+
+#[test]
+fn loop_max_reached_carries_distinct_reason_for_each_termination_path() {
+    // review §A finding #15 守护:LoopMaxReached.reason 区分自然 max / 外部 abort /
+    // sub-step 失败三条路径,UI/CLI 渲染按 reason 出不同文案。本 test 覆盖 sub-step
+    // 失败路径(SubStepFailed)— 借用 base_ref_missing 已有的活锁防御场景:base 不
+    // 存在 → review fail-loud → decision gate Abort → sub-step Err 透传 → loop
+    // emit LoopMaxReached{reason: SubStepFailed, max: 1}。
+    use agentpipe_engine::protocol::LoopEndReason;
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _v = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 5
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: agentpipe-nonexistent-base-ref
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx_tx, crx) = mpsc::channel();
+    ctx_tx.send(Command::Abort).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    ex.run();
+    let events: Vec<Event> = erx.try_iter().collect();
+    // 必有一条 LoopMaxReached{reason: SubStepFailed}
+    let sub_failed = events.iter().any(|e| {
+        matches!(
+            e,
+            Event::LoopMaxReached { loop_id, reason: LoopEndReason::SubStepFailed, .. }
+                if loop_id == "fixloop"
+        )
+    });
+    assert!(
+        sub_failed,
+        "sub-step Err 透传应 emit LoopMaxReached.reason=SubStepFailed: {events:?}"
+    );
+}
+
+#[test]
+fn step_gate_abort_classifies_run_as_aborted_not_failed() {
+    // review §A finding #13 守护:用户在 step 门控 / 决策门 选 Abort 时,executor 必须
+    // 翻 control.request_abort,让 run() 顶层分类落 RunStatus::Aborted(用户主动中止),
+    // 而非误分类为 Failed(引擎失败)。本 test 通过 step 模式发 Abort 验证。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _v = EnvGuard::set("STUB_VERDICT", "clean");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: step
+steps:
+  - id: only
+    kind: claude
+    prompt: "hi"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx_tx, crx) = mpsc::channel();
+    // step 门控 Abort:while waiting at first gate,发 Abort
+    ctx_tx.send(Command::Abort).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+    assert_eq!(
+        status,
+        RunStatus::Aborted,
+        "用户经决策门 Abort 必须分类为 RunStatus::Aborted,实际 {status:?}"
+    );
+    let events: Vec<Event> = erx.try_iter().collect();
+    let saw_finished_aborted = events.iter().any(|e| {
+        matches!(e, Event::RunFinished { status } if matches!(status, RunStatus::Aborted))
+    });
+    assert!(saw_finished_aborted, "RunFinished 必须报 Aborted: {events:?}");
 }

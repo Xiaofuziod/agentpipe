@@ -199,19 +199,98 @@ fn malformed_finding_missing_core_field_falls_back_to_changes_requested() {
     );
 }
 
+// review §A finding #11:RawFinding.suggestion 去 #[serde(default)] 后,「缺 suggestion
+// 字段 → fallback」语义与 malformed_finding_missing_core_field_falls_back_to_changes_requested
+// 同源(任一字段缺失都触发整 RawReview 解析失败 → fallback ChangesRequested)。原
+// legacy_finding_without_suggestion_field test 与 malformed test 是等价覆盖,删除避免冗余 —
+// stub-codex.sh 现已补 suggestion 字段对齐新 schema,不再作为 legacy 输入。
+
 #[test]
-fn legacy_finding_without_suggestion_field_still_parses() {
-    // 旧 fixture(stub-codex.sh)输出不含 suggestion 字段;serde default 给空串,
-    // 渲染时按"无建议"跳过 ↳ 行,保持向后兼容。
+fn review_mr_rejects_dash_prefixed_base_ref_fail_loud() {
+    // review §A finding #10:base_ref_resolvable 必须拒以 `-` 开头的 base,否则
+    // `git rev-parse --verify --quiet --help` 把 `--help` 当 git option(印 help 退 0)
+    // → 误判 ref 存在 → codex 实际跑 `git diff --help...HEAD` 输出乱码。
+    // 双层防御:① 字面 reject 以 `-` 开头 ② --end-of-options 兜底。本测试守护 ①。
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("STUB_VERDICT", "changes_requested");
-    let r = stub()
-        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
-        .expect("review ok");
-    assert!(r.findings.contains("示例问题"), "legacy 字段应正常解析");
+    let err = stub()
+        .review(
+            &CodexAction::ReviewMr,
+            None,
+            Some("--help"),
+            None,
+            None,
+            &mut |_: &str, _: Option<u32>| {},
+            &PathBuf::from("."),
+        )
+        .expect_err("以 - 开头的 base 必须 fail-loud,不能静默放过");
+    let msg = err.to_string();
     assert!(
-        !r.findings.contains("↳"),
-        "无 suggestion 字段时不应有 ↳ 行: {}",
+        msg.contains("无法解析") || msg.contains("--help"),
+        "错误信息应明示 base ref 不可解析: {msg}"
+    );
+}
+
+#[test]
+fn placeholder_suggestion_trims_trailing_punctuation_and_full_width() {
+    // review §A finding #12:占位过滤必须吃掉尾部标点和全角空白,否则 LLM 返回
+    // "N/A." / "无。" / "(none)" 类装饰串绕过过滤,渲染出 "↳ 建议: N/A." 噪音
+    // 喂下游 fixer。normalize_suggestion 在 render_finding 内调用,通过整 review
+    // 跑完 → findings 文本端验证。
+    use agentpipe_engine::protocol::ReviewResult;
+    use std::env;
+    // 直接驱动 parse_review_stdout 的私有路径不行(私有),通过 stub 注入构造场景:
+    // 临时拼一个 codex 输出,占位 suggestion 有尾部全角句号 → 期望不渲染 ↳ 行。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // 用 ENV+stub 模拟:写一个动态 stub,产出 suggestion='N/A.' (尾部西文句号) +
+    // suggestion='无。' (全角句号)+ suggestion='(none)' (括号包) 三条 finding,
+    // 全部应被识别为 placeholder 不出 ↳ 行;再有一条真 suggestion 应出 ↳ 行确认
+    // 过滤未误伤。
+    let tmpdir = env::temp_dir();
+    let stub_path = tmpdir.join("agentpipe-stub-placeholder.sh");
+    std::fs::write(
+        &stub_path,
+        r#"#!/usr/bin/env bash
+out=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "-o" ]; then out="$arg"; fi
+  prev="$arg"
+done
+cat > "$out" <<'EOF'
+{"verdict":"changes_requested","findings":[
+  {"severity":"low","file":"a.rs","line":1,"summary":"P1","suggestion":"N/A."},
+  {"severity":"low","file":"a.rs","line":2,"summary":"P2","suggestion":"无。"},
+  {"severity":"low","file":"a.rs","line":3,"summary":"P3","suggestion":"(none)"},
+  {"severity":"low","file":"a.rs","line":4,"summary":"P4","suggestion":"用 X 替换 Y"}
+]}
+EOF
+echo "done"
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&stub_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let r: ReviewResult = CodexRunner::new(stub_path.to_string_lossy().into_owned())
+        .review(
+            &CodexAction::ReviewMr,
+            None,
+            Some("HEAD"),
+            None,
+            None,
+            &mut |_: &str, _: Option<u32>| {},
+            &PathBuf::from("."),
+        )
+        .expect("review ok");
+    // P1 / P2 / P3 都是占位,应被识别 → 不出 ↳ 建议
+    assert!(!r.findings.contains("↳ 建议: N/A."), "尾部 . 应被识别为占位: {}", r.findings);
+    assert!(!r.findings.contains("↳ 建议: 无。"), "全角句号应被剥离: {}", r.findings);
+    assert!(!r.findings.contains("↳ 建议: (none)"), "括号包应被识别: {}", r.findings);
+    // P4 真 suggestion 应正常渲染
+    assert!(
+        r.findings.contains("↳ 建议: 用 X 替换 Y"),
+        "真 suggestion 不该被误伤: {}",
         r.findings
     );
+    let _ = std::fs::remove_file(&stub_path);
 }

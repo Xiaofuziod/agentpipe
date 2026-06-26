@@ -49,20 +49,35 @@ impl RunContext {
         }
     }
 
-    /// 设置 per-run USD 上限。**fail-loud**:非正/非有限值 panic(与 Executor::new 的
-    /// manifest.validate().expect 同形,保持 safety-fail-closed 基线)。
-    /// review-2 §C finding #3 修正:之前 silently 落 None 是 fail-OPEN 反「budget 是钱
-    /// 类安全字段、默认 fail-closed」基线 — LangChain $47K 反模式正中靶心。生产路径
-    /// 走 manifest.validate() → Executor::new → set_budget,合法值唯一来源,该 panic
-    /// 实际不会被合法 caller 触发,只在测试 / SDK 误用时立刻报错。
+    /// 设置 per-run USD 上限。**fail-soft warn**:非正/非有限值 → stderr 警告 + 落回 None。
+    ///
+    /// 设计裁决(review-3 §A finding #14):同 PR 的 Executor::try_new 已改 Result 路径
+    /// (库 API 不该构造期 panic),set_budget 也属库 API,fail-loud panic 会让 SDK 嵌入
+    /// 方(Tauri / 任意 Rust 调用方)整线程崩,与 try_new 的「fail-soft 让 caller 决策」
+    /// 策略冲突。
+    ///
+    /// 安全方向上仍保持 fail-CLOSED:无效预算落 None = 「无 budget 限制」而非「应用了
+    /// 一个奇怪值」,不会引入"用户以为有 budget 实则没有"的隐式漂移 —— 因为同时打了
+    /// stderr 警告,可观测。生产路径(Manifest::validate → Executor::try_new → set_budget)
+    /// 永远拿到合法值,这条警告只对 SDK 误用 / 测试路径生效,与 add_cost 的脏 delta
+    /// 警告同形(集中处理无效数值,无 panic)。
     pub fn set_budget(&mut self, budget_usd: Option<f64>) {
-        if let Some(b) = budget_usd {
-            assert!(
-                b.is_finite() && b > 0.0,
-                "set_budget: budget_usd={b} 必须为正有限数(应先 Manifest::validate)"
-            );
+        match budget_usd {
+            Some(b) if b.is_finite() && b > 0.0 => {
+                self.budget_usd = Some(b);
+            }
+            Some(bad) => {
+                eprintln!(
+                    "[agentpipe] WARN: set_budget 拒绝无效预算 {bad}(NaN/inf/非正),\
+                     落回 None = 无 budget 限制。生产路径应先 Manifest::validate,\
+                     SDK 嵌入方请在调用前自行校验。"
+                );
+                self.budget_usd = None;
+            }
+            None => {
+                self.budget_usd = None;
+            }
         }
-        self.budget_usd = budget_usd;
     }
 
     pub fn cost_so_far_usd(&self) -> f64 {
@@ -153,6 +168,27 @@ mod tests {
         // 任何额外 cost 都触发
         ctx.add_cost(0.001);
         assert!(ctx.is_over_budget());
+    }
+
+    #[test]
+    fn set_budget_warn_and_fallback_on_invalid_does_not_panic() {
+        // review §A #14:set_budget 改 fail-soft warn,而非 panic。SDK 嵌入方误用
+        // 不该崩整线程;非法值落 None = 无 budget 限制 + stderr 警告。
+        let mut ctx = RunContext::new(PathBuf::from("/tmp"));
+        ctx.set_budget(Some(f64::NAN));
+        assert_eq!(ctx.budget_usd(), None, "NaN 应被拒并落 None");
+        ctx.set_budget(Some(-1.5));
+        assert_eq!(ctx.budget_usd(), None, "负数应被拒并落 None");
+        ctx.set_budget(Some(0.0));
+        assert_eq!(ctx.budget_usd(), None, "0 应被拒并落 None");
+        ctx.set_budget(Some(f64::INFINITY));
+        assert_eq!(ctx.budget_usd(), None, "inf 应被拒并落 None");
+        // 合法值正常生效
+        ctx.set_budget(Some(5.0));
+        assert_eq!(ctx.budget_usd(), Some(5.0));
+        // 显式 None 也正常
+        ctx.set_budget(None);
+        assert_eq!(ctx.budget_usd(), None);
     }
 
     #[test]

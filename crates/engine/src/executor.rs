@@ -1,7 +1,7 @@
 use crate::context::{RunContext, StepOutput, Verdict};
 use crate::control::Control;
 use crate::manifest::{Manifest, OnUnmet, RunMode, Step, StepKind, Verifier, Verify};
-use crate::protocol::{Command, Event, GateKind, RunStatus, StepMetrics, StepStatus};
+use crate::protocol::{Command, Event, GateKind, LoopEndReason, RunStatus, StepMetrics, StepStatus};
 use crate::runner::claude::ClaudeRunner;
 use crate::runner::codex::CodexRunner;
 use std::sync::mpsc::{Receiver, Sender};
@@ -140,6 +140,9 @@ impl Executor {
                     return Ok(());
                 }
                 _ => {
+                    // 与 decision_gate 同形:step 门控的 Abort 路径也翻 abort 标志,
+                    // 让 run() 顶层分类 RunStatus::Aborted(review §A finding #13)。
+                    self.control.request_abort();
                     self.fail(&step.id, "aborted".into());
                     return Err(());
                 }
@@ -182,9 +185,11 @@ impl Executor {
                     match res {
                         Ok(out) => {
                             let summary = format!("verdict={:?}", out.verdict);
-                            // 先 charge:即使 codex 当前 metrics 始终 None(无 cost 上报),
-                            // 字段就位后未来升级直接生效。? 短路在超额时跳出 step。
-                            self.charge_and_check(&step.id, &out.metrics)?;
+                            // 先 charge,再 check_budget(StepFailed 携带 cumulative,与
+                            // claude/acp 路径同形)。codex 单次 step 没有累积概念,cumulative
+                            // = 单次 out.metrics(实际目前 None,等 codex CLI 升级)。
+                            self.charge(&out.metrics);
+                            self.check_budget(&step.id, &out.metrics)?;
                             self.ctx.record(&step.id, StepOutput {
                                 findings: Some(out.findings),
                                 verdict: Some(out.verdict),
@@ -237,9 +242,11 @@ impl Executor {
                     let metrics = out.metrics;
                     let answer = out.answer;
                     // 每次 attempt 都 charge —— verify-retry 中段不再丢 cost(本 PR 主修)。
-                    // ? 短路:超额在末轮 attempt 末尾立刻停,不让下一次 retry 继续烧。
-                    self.charge_and_check(&step.id, &metrics)?;
+                    // 先 sum 出 cumulative 再 check_budget:budget 触发的 StepFailed 携带
+                    // 该 step 至今的全部花费,audit 不漏统计(review §A finding #4)。
+                    self.charge(&metrics);
                     step_metrics = Self::sum_metrics(step_metrics, metrics);
+                    self.check_budget(&step.id, &step_metrics)?;
                     self.ctx.record(&step.id, StepOutput {
                         artifact: Some(answer.clone()),
                         ..Default::default()
@@ -256,8 +263,11 @@ impl Executor {
                     on_line("校验中…", None);
                     let (verdict, findings, verifier_metrics) = self.verify_once(v, &mut on_line);
                     // verifier 自身的 cost 也入账(spec §3.1:verifier 钱也要进 budget)。
-                    self.charge_and_check(&step.id, &verifier_metrics)?;
+                    // 同样 charge → sum → check 顺序,确保 budget StepFailed 拿到包含
+                    // verifier 这一笔的 cumulative。
+                    self.charge(&verifier_metrics);
                     step_metrics = Self::sum_metrics(step_metrics, verifier_metrics);
+                    self.check_budget(&step.id, &step_metrics)?;
                     // 暴露 verifier findings 供下游 {{<id>.findings}} 引用
                     self.ctx.record(&step.id, StepOutput {
                         artifact: Some(answer.clone()),
@@ -283,11 +293,16 @@ impl Executor {
                             return Ok(());
                         }
                         OnUnmet::Fail => {
-                            // cost 已经在每次 attempt + verifier 后 charge 过,此处 fail 路径
-                            // 直接 emit 失败事件不再补 charge(否则重复)。step_metrics 走 fail
-                            // 路径就丢失了 — 这是 Result::Err 自然语义,audit 看不到失败 step 的
-                            // cost 是已知 trade-off(review-2 §B doc note)。
-                            self.fail(&step.id, format!("校验未通过(已重试 {} 次)", v.max_retries));
+                            // cost 已经在每次 attempt + verifier 后 charge 过,此处不再补 charge
+                            // (否则重复)。但要把 step_metrics 带进 StepFailed,让 audit
+                            // 看到 verify-retry 累积花费 — review §A finding #4 治本(前 PR
+                            // 这条路径是「known trade-off」直接丢 cost,与 budget 触发的 fail
+                            // 路径同形,本次统一)。
+                            self.fail_with_metrics(
+                                &step.id,
+                                format!("校验未通过(已重试 {} 次)", v.max_retries),
+                                step_metrics.clone(),
+                            );
                             return Err(());
                         }
                         OnUnmet::Gate => {
@@ -316,31 +331,41 @@ impl Executor {
                 self.run_human(step, &instr, expects.is_some(), value.as_deref())
             }
             StepKind::Acp { agent, command, prompt } => {
+                // review §A finding #7:ACP step 不走自动 retry loop。理由:ACP runner
+                // 当前 metrics 永远 None(F1),如果遇到 empty-answer / 配错 agent 一类
+                // fail-loud 失败,decision_gate 的 Retry 选项在 budget_usd=None 时不被
+                // budget 兜底,容易让用户连点 Retry 无限烧 LLM 钱。
+                //
+                // 与 claude(有 verify-retry 语义)/ codex(单次 review)不同:ACP 是
+                // 「跑一次拿 answer」的通用接入层,没有 verify 概念,失败重试本应由
+                // 用户手动重启 run(顺便确认是否调整 budget),不在自动决策门内重试。
+                // Skip / Abort 仍可走。
                 let mut on_line = self.progress_sink(&step.id);
                 let p = self.ctx.interpolate(prompt);
                 let runner = crate::runner::acp::AcpRunner::new(crate::runner::acp::AcpConfig {
                     agent: agent.clone(),
                     command: command.clone(),
                 });
-                loop {
-                    match runner.run(&p, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd) {
-                        Ok(out) => {
-                            self.charge_and_check(&step.id, &out.metrics)?;
-                            self.ctx.record(&step.id, StepOutput {
-                                artifact: Some(out.answer.clone()),
-                                ..Default::default()
-                            });
-                            self.finish(&step.id, "done · acp".into(), out.metrics);
-                            return Ok(());
-                        }
-                        Err(e) => match self.handle_failure(&step.id, e.to_string()) {
-                            StepDecision::Retry => continue,
-                            StepDecision::Skip => {
-                                self.emit_skipped(&step.id);
-                                return Ok(());
-                            }
-                            StepDecision::Abort => return Err(()),
-                        },
+                match runner.run(&p, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd) {
+                    Ok(out) => {
+                        // 同 codex/claude 路径:charge 单次 → check_budget 带 cumulative。
+                        // ACP 单次 step 无累积,cumulative = 单次。
+                        self.charge(&out.metrics);
+                        self.check_budget(&step.id, &out.metrics)?;
+                        self.ctx.record(&step.id, StepOutput {
+                            artifact: Some(out.answer.clone()),
+                            ..Default::default()
+                        });
+                        self.finish(&step.id, "done · acp".into(), out.metrics);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        // 失败直接 emit StepFailed + Err 退 step,不走 decision_gate。
+                        // 触发 abort 标志让 run() 顶层分类落 Aborted("ACP 失败,人工
+                        // 重启 run"),与「budget=None 时的隐式重试 LLM 烧钱」彻底脱钩。
+                        self.fail(&step.id, e.to_string());
+                        self.control.request_abort();
+                        Err(())
                     }
                 }
             }
@@ -350,6 +375,12 @@ impl Executor {
 
     /// 发一个决策 gate(重试/跳过/中止)并阻塞等宿主指令。已中止则直接 Abort 不弹门。
     /// 失败重试与校验未达成共用这条通道。
+    ///
+    /// review §A finding #13:用户经决策门选 Abort 时,必须同步翻 Control::request_abort,
+    /// 否则 run() 顶层分类只看 control.is_aborted() / over_budget → 用户主动 Abort 会被
+    /// 误分类为 Failed("引擎失败"),Tauri 宿主当前用 Command::Abort+request_abort 配对
+    /// 才避开这条,但引擎库 API 不该依赖 host 的对齐 — 这里 fail-loud 翻 abort 标志,
+    /// 与 Tauri 路径同构,SDK 嵌入方零负担。
     fn decision_gate(&self, step_id: &str, suggestion: String) -> StepDecision {
         if self.control.is_aborted() {
             return StepDecision::Abort;
@@ -363,19 +394,24 @@ impl Executor {
         match self.commands.recv() {
             Ok(Command::ApproveGate { .. }) => StepDecision::Retry,
             Ok(Command::SkipStep { .. }) => StepDecision::Skip,
-            _ => StepDecision::Abort,
+            _ => {
+                // 决策门 Abort(显式 Command::Abort / 信道关闭) → 翻 abort 标志,让
+                // run() 顶层分类自然走 RunStatus::Aborted("用户中止"),与 Tauri 路径
+                // 对齐;子进程已退出,kill_current 是 no-op,无副作用。
+                self.control.request_abort();
+                StepDecision::Abort
+            }
         }
     }
 
     /// step 失败(进程非零)的处理:发 StepFailed 后走决策 gate。
+    /// runner Err 路径没有可信的累积成本(spawn 失败 / 超时等),metrics = None;
+    /// budget 触发 / OnUnmet::Fail 的有 metrics 路径走 check_budget / fail_with_metrics。
     fn handle_failure(&mut self, step_id: &str, err: String) -> StepDecision {
         if self.control.is_aborted() {
             return StepDecision::Abort;
         }
-        let _ = self.events.send(Event::StepFailed {
-            step_id: step_id.to_string(),
-            error: err,
-        });
+        self.fail(step_id, err);
         self.decision_gate(step_id, "step 失败,选择 重试 / 跳过 / 中止".into())
     }
 
@@ -426,7 +462,19 @@ impl Executor {
                     true, // verifier 只读(plan 模式)
                 ) {
                     Ok(out) => (parse_verdict(&out.answer), out.answer, out.metrics),
-                    Err(e) => (Verdict::ChangesRequested, format!("校验执行失败: {e}"), None),
+                    Err(e) => {
+                        // review §A finding #3:Verifier::Claude Err 路径 metrics=None。
+                        // claude CLI 在 Err 之前可能已经烧了部分 token(超时 / 非零退出
+                        // 都在传输 stream-json 末尾 result 行之前发生 → metrics 拿不到);
+                        // 这一笔 cost 不会进 ctx.cost_so_far_usd,budget 触发不了。
+                        // 显式 eprintln warn 让用户知道 budget guard 在此 attempt 失效
+                        // (CLI/Tauri 未装 tracing_subscriber,用 stderr 直发保证可见)。
+                        eprintln!(
+                            "[agentpipe] WARN: Verifier::Claude 执行失败,本次 attempt 的 \
+                             cost 未上报、不会扣 budget — 错误: {e}"
+                        );
+                        (Verdict::ChangesRequested, format!("校验执行失败: {e}"), None)
+                    }
                 }
             }
             Verifier::Command => {
@@ -489,6 +537,9 @@ impl Executor {
                 Ok(())
             }
             _ => {
+                // Human 门 abort 与 step / decision 门同形:翻 abort 标志让顶层分类
+                // 落到 RunStatus::Aborted(review §A finding #13)。
+                self.control.request_abort();
                 self.fail(&step.id, "aborted".into());
                 Err(())
             }
@@ -498,12 +549,13 @@ impl Executor {
     fn run_loop(&mut self, loop_id: &str, until: &str, max: u32, body: &[Step], gated: bool) -> Result<(), ()> {
         for n in 1..=max {
             if self.control.is_aborted() {
-                // 控制中止:emit LoopMaxReached 让 GUI loop 视图收尾(review-2 §E
-                // finding #11 — 复用现有 variant,语义降级为「loop 因外因停止」,避免
-                // 加新 Event 变体的跨端同步代价)。
+                // 控制中止:emit LoopMaxReached{reason: Aborted}让 UI 渲染区分于「自然耗
+                // 尽 max」(review §A finding #15)。前 PR 共用 MaxReached 让用户看到
+                // 「hit max 0, still not clean」语义噪音 — reason 明确分流。
                 let _ = self.events.send(Event::LoopMaxReached {
                     loop_id: loop_id.into(),
                     max: n.saturating_sub(1),
+                    reason: LoopEndReason::Aborted,
                 });
                 return Err(());
             }
@@ -513,11 +565,12 @@ impl Executor {
             });
             for sub in body {
                 if self.run_step(sub, gated).is_err() {
-                    // sub-step charge_and_check Err / 决策门 Abort / 控制中止 → 透传 Err 前
-                    // 补 LoopMaxReached 收尾,与上方控制中止路径同形(review-2 §E #11)。
+                    // sub-step 失败 Err 透传:reason=SubStepFailed,与控制中止 / 自然 max
+                    // 三态分明。UI/CLI 各自按 reason 出不同文案,不再「都说 hit max」。
                     let _ = self.events.send(Event::LoopMaxReached {
                         loop_id: loop_id.into(),
                         max: n,
+                        reason: LoopEndReason::SubStepFailed,
                     });
                     return Err(());
                 }
@@ -533,6 +586,7 @@ impl Executor {
         let _ = self.events.send(Event::LoopMaxReached {
             loop_id: loop_id.into(),
             max,
+            reason: LoopEndReason::MaxReached,
         });
         Ok(())
     }
@@ -567,8 +621,10 @@ impl Executor {
     }
 
     /// 纯事件发射 — emit StepFinished{Done},不累加 cost、不判 budget。
-    /// budget 由 `charge_and_check` 在每个 spawn 点单独负责,避免 cost 只在
-    /// 末次 attempt finish 时入账(verify-retry / Fail 路径漏统计)。
+    /// budget 由 `charge` + `check_budget` 在每个 spawn 点单独负责(review §A finding
+    /// #4 之后由 charge_and_check 拆分:check_budget 要拿到 cumulative metrics 才能
+    /// 把它带进 over-budget StepFailed,让 audit 不漏统计),避免 cost 只在末次 attempt
+    /// finish 时入账(verify-retry / Fail 路径漏统计)。
     fn finish(&self, step_id: &str, summary: String, metrics: Option<StepMetrics>) {
         let _ = self.events.send(Event::StepFinished {
             step_id: step_id.to_string(),
@@ -594,21 +650,24 @@ impl Executor {
         }
     }
 
-    /// 累加一次 spawn 的成本 + 立即判 budget。Err(()) 表示本次 charge 触发了超额,
-    /// callsite 应当 `?` 短路终止 step。在每次 claude.run / codex.review / verify_once
-    /// 拿到 Ok 后立即调用,确保 verify-retry 中段 / OnUnmet::Fail 路径的真实花费
-    /// 都入账(spec §3.1 反 LangChain $47K 类失控的核心保证)。
-    ///
-    /// over-budget 时只 emit 一条 StepFailed(step 工作虽然完成,但 run 必须停),不
-    /// 双 emit StepFinished+StepFailed —— 由调用方决定是否补 finish(charge 失败
-    /// 即 ? 短路,通常 caller 不会再走到 finish)。
-    fn charge_and_check(
-        &mut self,
-        step_id: &str,
-        metrics: &Option<StepMetrics>,
-    ) -> Result<(), ()> {
+    /// 累加一次 spawn 的成本(单次 delta),不判 budget。专门做 cost 累加这一件事,
+    /// 与 check_budget 拆开 — review §A finding #4 后:budget 触发的 StepFailed 必须
+    /// 携带 step 内 cumulative metrics(让 audit 不漏统计),check_budget 需要拿到
+    /// cumulative 才能 emit,charge 单次 + cumulative sum 必须语义分离。
+    fn charge(&mut self, metrics: &Option<StepMetrics>) {
         let cost = metrics.as_ref().map(|m| m.cost_usd).unwrap_or(0.0);
         self.ctx.add_cost(cost);
+    }
+
+    /// 判 budget;超额 emit StepFailed{metrics: step_cumulative}并 Err(())。caller 在
+    /// `charge` + `sum_metrics` 累计后立即调用,确保 emit 出去的失败事件携带该 step
+    /// 至今的完整花费(audit::aggregate_cost 能正确合计 — 修补旧版「budget 砍 step,
+    /// audit 显示 $0」漂移,review §A finding #4)。
+    fn check_budget(
+        &self,
+        step_id: &str,
+        step_metrics: &Option<StepMetrics>,
+    ) -> Result<(), ()> {
         if self.ctx.is_over_budget() {
             let spent = self.ctx.cost_so_far_usd();
             let cap = self
@@ -620,6 +679,7 @@ impl Executor {
                 error: format!(
                     "超出 USD budget (累计 ${spent:.4} > 上限 ${cap:.4} during step '{step_id}')"
                 ),
+                metrics: step_metrics.clone(),
             });
             return Err(());
         }
@@ -636,9 +696,16 @@ impl Executor {
     }
 
     fn fail(&self, step_id: &str, error: String) {
+        self.fail_with_metrics(step_id, error, None);
+    }
+
+    /// fail 的带 cumulative metrics 变体,供 OnUnmet::Fail 等已累积花费的路径
+    /// 把 step 内 attempt + verifier 的 cost 一并送给 audit。review §A finding #4。
+    fn fail_with_metrics(&self, step_id: &str, error: String, metrics: Option<StepMetrics>) {
         let _ = self.events.send(Event::StepFailed {
             step_id: step_id.to_string(),
             error,
+            metrics,
         });
     }
 }

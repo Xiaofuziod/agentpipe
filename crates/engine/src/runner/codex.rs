@@ -6,9 +6,14 @@ use crate::manifest::CodexAction;
 use crate::protocol::ReviewResult;
 use serde::Deserialize;
 use std::path::Path;
+use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static OUT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 一次性 warn:codex CLI 当前不在 stdout 输出 token usage,Verifier::Codex 不上报
+/// metrics,budget_usd 对 codex 验证步骤形同虚设(review §A finding #2)。
+static WARN_CODEX_COST_BYPASS: Once = Once::new();
 
 /// review prompt 共用尾巴:要求 reviewer 为每个 finding 给具体可执行 suggestion。
 /// 两处 prompt 共用,避免漂移(spec §3.2)。**自带前导空格 + 句号收尾**,与调用方
@@ -37,17 +42,20 @@ struct RawReview {
 
 #[derive(Deserialize)]
 struct RawFinding {
-    // 核心字段去 #[serde(default)]:与 REVIEW_SCHEMA required 对齐;缺失即整条解析
-    // 失败,走 fallback ChangesRequested(review-fix §D finding #7 治本,不再静默
-    // 渲染 "[] :0 " 乱码喂下游 fixer)。
+    // 全部字段 required:与 REVIEW_SCHEMA `required: [...]` 对齐(OpenAI strict mode
+    // 要求所有 properties 都 required,additionalProperties:false)。任一字段缺失即整条
+    // 解析失败,走 fallback ChangesRequested,不静默渲染空串 / 默认值喂下游 fixer。
+    //
+    // review §A finding #11:旧版 suggestion 留 `#[serde(default)]` 与 schema required
+    // 矛盾 —— 生产 OpenAI 拒老 codex 二进制(无 suggestion 字段)在 schema 层、serde
+    // 反而 default 空串通过,两层语义对不上让 reader 困惑且 legacy guard 实际死代码。
+    // 现统一 fail-loud:旧 codex 二进制必须升级,与 spec §3.2 文档明示「min codex
+    // version」对齐。
     severity: String,
     file: String,
     line: i64,
     summary: String,
     /// 具体修改建议(spec §3.2),提升下游 fixer 的可操作性。
-    /// optional:旧 codex 二进制不输出时 serde 给空串,渲染时按"无建议"处理。
-    /// (review-fix §D:从 required 改 optional,与 spec §3.2「向后兼容」对齐)
-    #[serde(default)]
     suggestion: String,
 }
 
@@ -77,6 +85,18 @@ impl CodexRunner {
         on_progress: &mut dyn FnMut(&str, Option<u32>),
         cwd: &Path,
     ) -> Result<ReviewResult, EngineError> {
+        // 一次性显式告警:codex review 不上报 cost,budget_usd 对 codex 验证 step 无效。
+        // review §A finding #2:让用户可观测 budget guard 在此通道处于 inactive,
+        // 避免"配了 budget 仍被烧光"的反认知体验。等 codex CLI 升级出 usage 后填实。
+        // 用 eprintln 同 acp.rs:CLI/Tauri 未装 tracing_subscriber,tracing 会被吞。
+        WARN_CODEX_COST_BYPASS.call_once(|| {
+            eprintln!(
+                "[agentpipe] WARN: codex review 当前不上报 token cost(codex CLI \
+                 暂无 usage 输出),codex step / Verifier::Codex 不计入 budget_usd \
+                 — 如需 budget 兜底请用 Verifier::Claude 或等 codex CLI 升级。"
+            );
+        });
+
         let seq = OUT_SEQ.fetch_add(1, Ordering::Relaxed);
         let out_file = std::env::temp_dir()
             .join(format!("agentpipe-codex-{}-{}.json", std::process::id(), seq));
@@ -180,11 +200,19 @@ impl CodexRunner {
 /// base ref 能否在 cwd 仓库解析为 commit。与 codex 实际跑的 `git diff {base}...HEAD`
 /// 同一套 gitrevisions 规则(裸 ref,不做 `origin/` DWIM);`^{commit}` 确保解析到 commit-ish。
 /// git 不可用 / 非 git 仓库 / ref 不存在一律返回 false → 调用方 fail-loud(绝不静默放过)。
+///
+/// 安全:`base` 以 `-` 开头时,若不带分隔符直接喂给 git rev-parse 会被当成 git 选项
+/// (如 `--help` 让 git 退出 0 印帮助;`--exec=cmd` 类 CVE 输入更危险),误判 ref 存在。
+/// 双层防御:① 字面 reject 以 `-` 开头的 base;② `--end-of-options`(git 2.24+,2019)
+/// 强制告诉 rev-parse 后续 args 一律是 refs 不是选项,即便未来引入新选项也不混淆。
 fn base_ref_resolvable(cwd: &Path, base: &str) -> bool {
+    if base.starts_with('-') {
+        return false;
+    }
     std::process::Command::new("git")
         .arg("-C")
         .arg(cwd)
-        .args(["rev-parse", "--verify", "--quiet"])
+        .args(["rev-parse", "--verify", "--quiet", "--end-of-options"])
         .arg(format!("{base}^{{commit}}"))
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -199,18 +227,30 @@ fn base_ref_resolvable(cwd: &Path, base: &str) -> bool {
 /// 列表 '- xxx' 残留),整串等值匹配会误吞真实建议。保留高置信占位:n/a / none / 无 / tbd。
 const SUGGESTION_PLACEHOLDERS: &[&str] = &["n/a", "none", "无", "tbd"];
 
-/// caller(render_finding)已 trim 输入,此处只 to_lowercase 即可(review-2 §D
-/// finding #13:删冗余 inner trim)。
+/// suggestion 归一化:同时剥离 ASCII 空白 / 全角空白 / 包含中英标点的尾部装饰
+/// (例 `"N/A."`、`"无。"`、`"None!"`、`"  无 "`)。
+/// 修治 review §A finding #8:Rust `str::trim()` 只剥 Unicode whitespace,
+/// 不动 `.` / `。` / `,` / `，` 等;LLM 给 schema-required 字段时为了"看起来像句子"
+/// 常附标点,导致 'N/A.' 绕过 placeholder 检测、`"↳ 建议: N/A."`噪声喂下游 fixer。
+fn normalize_suggestion(s: &str) -> String {
+    s.trim_matches(|c: char| {
+        c.is_whitespace() || ".,;:!?。，；：！？、…·•※()[]【】「」\"'`".contains(c)
+    })
+    .to_string()
+}
+
+/// 占位检测:输入应为 `normalize_suggestion` 归一后的小写串。
 fn is_placeholder_suggestion(s: &str) -> bool {
-    SUGGESTION_PLACEHOLDERS.contains(&s.to_lowercase().as_str())
+    let lower = s.to_lowercase();
+    SUGGESTION_PLACEHOLDERS.contains(&lower.as_str())
 }
 
 /// 单条 finding 渲染为人读行;suggestion 非空且非占位时附加 "↳ 建议: ..." 行,
 /// 让下游 fixer prompt 直接看到可操作建议(spec §3.2)。
 fn render_finding(f: &RawFinding) -> String {
     let head = format!("[{}] {}:{} {}", f.severity, f.file, f.line, f.summary);
-    let s = f.suggestion.trim();
-    if s.is_empty() || is_placeholder_suggestion(s) {
+    let s = normalize_suggestion(&f.suggestion);
+    if s.is_empty() || is_placeholder_suggestion(&s) {
         head
     } else {
         format!("{head}\n  ↳ 建议: {s}")
@@ -279,11 +319,11 @@ fn parse_review(out_file: &Path) -> ReviewResult {
 // 且所有属性进 required,否则 API 报 invalid_json_schema(实测,见 docs/specs/cli-behavior-findings.md:18)。
 //
 // suggestion 字段(spec §3.2):reviewer 提供具体修改建议,提升下游 fixer 反馈深度。
-// **必填**(review-2 §A finding #1 修正):上一轮把 suggestion 从 required 移出与「所有
-// properties 必须 required」OpenAI 约束冲突,真实 codex 调用会被 422 invalid_json_schema
-// reject 触发 loop 活锁。现回归 required;旧 codex 二进制不支持新 schema 时直接报错(用户
-// 责任升级 codex,与 agentpipe 锁版本策略一致 — spec §3.2 follow-up:文档明示 min codex)。
-// RawFinding.suggestion 仍 #[serde(default)] 兜底解析端(mock fixture / 边缘 JSON)。
+// **必填**:OpenAI strict mode 要求所有 properties 都 required;RawFinding 端也去掉了
+// `#[serde(default)]`,两层语义对齐(review §A finding #11 — 旧版 schema required +
+// serde default 矛盾,生产 OpenAI 拒老 codex 在 schema 层、serde 反而 default 通过,
+// 让 reader 困惑且 legacy guard 实际是死代码)。旧 codex 二进制需升级到支持新 schema,
+// 与 agentpipe 锁版本策略一致(spec §3.2 follow-up:文档明示 min codex)。
 const REVIEW_SCHEMA: &str = r#"{
   "type":"object","additionalProperties":false,
   "required":["verdict","findings"],

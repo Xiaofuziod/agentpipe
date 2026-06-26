@@ -26,9 +26,6 @@ pub struct Executor {
     control: Arc<Control>,
     events: Sender<Event>,
     commands: Receiver<Command>,
-    /// 累计 cost 超出 manifest.budget_usd 时由 `finish` 置 true。
-    /// run() 主循环识别后走 RunStatus::Aborted,语义上是受外部约束停止(对齐 Control aborted)。
-    over_budget: bool,
 }
 
 impl Executor {
@@ -49,7 +46,6 @@ impl Executor {
             control,
             events,
             commands,
-            over_budget: false,
         }
     }
 
@@ -88,8 +84,9 @@ impl Executor {
         for step in &steps {
             if self.run_step(step, gated).is_err() {
                 // run_step 的 Err 来自:Abort 路径(失败已走决策 gate)/ Control aborted / over_budget。
-                // budget 与 Control aborted 都按 Aborted 上报(受外部约束停止,不是 step 工作失败)。
-                let status = if self.over_budget || self.control.is_aborted() {
+                // budget 与 Control aborted 都按 Aborted 上报(受外部约束停止,不是 step 工作失败);
+                // 单一状态源 = ctx(无独立 over_budget 字段),避免"flag 与 ctx 派生量"漂移。
+                let status = if self.ctx.is_over_budget() || self.control.is_aborted() {
                     RunStatus::Aborted
                 } else {
                     RunStatus::Failed
@@ -173,8 +170,7 @@ impl Executor {
                                 verdict: Some(out.verdict),
                                 ..Default::default()
                             });
-                            let over = self.finish(&step.id, summary, None);
-                            return if over { Err(()) } else { Ok(()) };
+                            return self.finish(&step.id, summary, None);
                         }
                         Err(e) => match self.handle_failure(&step.id, e.to_string()) {
                             StepDecision::Retry => continue,
@@ -224,8 +220,7 @@ impl Executor {
                     // 无校验门 → 退出码即完成(原行为)
                     let v = match verify {
                         None => {
-                            let over = self.finish(&step.id, "done".into(), metrics);
-                            return if over { Err(()) } else { Ok(()) };
+                            return self.finish(&step.id, "done".into(), metrics);
                         }
                         Some(v) => v,
                     };
@@ -239,8 +234,7 @@ impl Executor {
                     });
                     if matches!(verdict, Verdict::Clean) {
                         on_line("校验通过", None);
-                        let over = self.finish(&step.id, "done · 已校验".into(), metrics);
-                        return if over { Err(()) } else { Ok(()) };
+                        return self.finish(&step.id, "done · 已校验".into(), metrics);
                     }
                     // 未达成:还有重试预算就带反馈重跑
                     if attempt < v.max_retries {
@@ -252,9 +246,8 @@ impl Executor {
                     // 重试耗尽 → 升级策略
                     match v.on_unmet {
                         OnUnmet::Continue => {
-                            let over =
-                                self.finish(&step.id, "done · 未达标(continue)".into(), metrics);
-                            return if over { Err(()) } else { Ok(()) };
+                            return self
+                                .finish(&step.id, "done · 未达标(continue)".into(), metrics);
                         }
                         OnUnmet::Fail => {
                             self.fail(&step.id, format!("校验未通过(已重试 {} 次)", v.max_retries));
@@ -299,8 +292,7 @@ impl Executor {
                                 artifact: Some(out.answer.clone()),
                                 ..Default::default()
                             });
-                            let over = self.finish(&step.id, "done · acp".into(), out.metrics);
-                            return if over { Err(()) } else { Ok(()) };
+                            return self.finish(&step.id, "done · acp".into(), out.metrics);
                         }
                         Err(e) => match self.handle_failure(&step.id, e.to_string()) {
                             StepDecision::Retry => continue,
@@ -422,8 +414,7 @@ impl Executor {
                         ..Default::default()
                     },
                 );
-                let over = self.finish(&step.id, "approved (preset)".into(), None);
-                return if over { Err(()) } else { Ok(()) };
+                return self.finish(&step.id, "approved (preset)".into(), None);
             }
         }
         let _ = self.events.send(Event::StepAwaitingGate {
@@ -438,8 +429,7 @@ impl Executor {
                     artifact,
                     ..Default::default()
                 });
-                let over = self.finish(&step.id, "approved".into(), None);
-                if over { Err(()) } else { Ok(()) }
+                self.finish(&step.id, "approved".into(), None)
             }
             Ok(Command::SkipStep { .. }) => {
                 self.emit_skipped(&step.id);
@@ -508,10 +498,17 @@ impl Executor {
         }
     }
 
-    /// emit StepFinished + 累加 cost;若累加后超 budget,额外 emit StepFailed 说明原因
-    /// 并置 self.over_budget。返回 true 表示调用方应当立即 `return Err(())` 终止 step。
+    /// emit StepFinished + 累加 cost;若累加后超 budget,额外 emit StepFailed 说明原因。
+    /// 返回 Err(()) 直接转给 run_step 的 `?` 短路终止 step,避免 7 处 callsite 手动
+    /// `if over { Err } else { Ok }` 样板。over-budget 状态走 ctx.is_over_budget()
+    /// 单一源,run() 主循环也读它,不存 Executor 字段。
     /// 见 docs/specs/2026-06-26-review-loop-budget-and-verdict-design.md §3.1。
-    fn finish(&mut self, step_id: &str, summary: String, metrics: Option<StepMetrics>) -> bool {
+    fn finish(
+        &mut self,
+        step_id: &str,
+        summary: String,
+        metrics: Option<StepMetrics>,
+    ) -> Result<(), ()> {
         // step 工作本身已完成 → 先 emit StepFinished,与改造前观察一致(避免 GUI / CLI 渲染顺序错位)。
         let cost = metrics.as_ref().map(|m| m.cost_usd).unwrap_or(0.0);
         let _ = self.events.send(Event::StepFinished {
@@ -520,8 +517,8 @@ impl Executor {
             summary,
             metrics,
         });
-        if self.ctx.add_cost_and_check(cost) {
-            self.over_budget = true;
+        self.ctx.add_cost(cost);
+        if self.ctx.is_over_budget() {
             let spent = self.ctx.cost_so_far_usd();
             let cap = self.ctx.budget_usd().unwrap_or(f64::NAN);
             let _ = self.events.send(Event::StepFailed {
@@ -530,9 +527,9 @@ impl Executor {
                     "超出 USD budget (累计 ${spent:.4} > 上限 ${cap:.4} after step '{step_id}')"
                 ),
             });
-            return true;
+            return Err(());
         }
-        false
+        Ok(())
     }
 
     fn emit_skipped(&self, step_id: &str) {

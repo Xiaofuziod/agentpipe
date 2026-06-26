@@ -191,9 +191,19 @@ fn base_ref_resolvable(cwd: &Path, base: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// 单条 finding 渲染为人读行;suggestion 非空且非占位("N/A" 大小写不敏感)时附加
+/// "↳ 建议: ..." 行,让下游 fixer prompt 直接看到可操作建议(spec §3.2)。
+fn render_finding(f: &RawFinding) -> String {
+    let head = format!("[{}] {}:{} {}", f.severity, f.file, f.line, f.summary);
+    let s = f.suggestion.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("n/a") {
+        head
+    } else {
+        format!("{head}\n  ↳ 建议: {s}")
+    }
+}
+
 /// RawReview → ReviewResult(verdict 归一 + findings 扁平化)。解析两路共用,避免漂移。
-/// suggestion 非空且非占位("N/A" 大小写不敏感)时追加 ↳ 行,让下游 fixer prompt 直接看到
-/// 可操作的具体建议(spec §3.2 反馈深度提升)。
 fn raw_to_result(raw: RawReview) -> ReviewResult {
     let verdict = if raw.verdict == "clean" {
         Verdict::Clean
@@ -203,15 +213,7 @@ fn raw_to_result(raw: RawReview) -> ReviewResult {
     let findings = raw
         .findings
         .iter()
-        .map(|f| {
-            let head = format!("[{}] {}:{} {}", f.severity, f.file, f.line, f.summary);
-            let s = f.suggestion.trim();
-            if s.is_empty() || s.eq_ignore_ascii_case("n/a") {
-                head
-            } else {
-                format!("{head}\n  ↳ 建议: {s}")
-            }
-        })
+        .map(render_finding)
         .collect::<Vec<_>>()
         .join("\n");
     ReviewResult { verdict, findings }

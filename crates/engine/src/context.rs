@@ -63,17 +63,18 @@ impl RunContext {
         self.budget_usd
     }
 
-    /// 累加一个 step 的成本,返回累加**之后**是否超额(`cost_so_far > budget`)。
-    /// 用 `>` 而非 `>=` 避免浮点抖动误杀刚好等于的情况。无 budget 永远返 false。
-    pub fn add_cost_and_check(&mut self, delta_usd: f64) -> bool {
-        // 防 NaN / 负数 cost 污染累计(实测 claude 偶尔会输出 0,不应该出现负数)
+    /// 累加一个 step 的成本。NaN / 负数 delta 被过滤(实测 claude 偶尔会输出 0,不应该出现负数),
+    /// 防脏数据污染累计。返回累加**之后**的累计值,调用方可立刻 `is_over_budget()`。
+    pub fn add_cost(&mut self, delta_usd: f64) {
         if delta_usd.is_finite() && delta_usd > 0.0 {
             self.cost_so_far_usd += delta_usd;
         }
-        match self.budget_usd {
-            Some(cap) => self.cost_so_far_usd > cap,
-            None => false,
-        }
+    }
+
+    /// 当前累计是否超 budget。无 budget 永远 false;有 budget 用 `>` 而非 `>=`
+    /// 避免浮点抖动误杀刚好等于的情况。run() 主循环 / finish 都可读,单一来源。
+    pub fn is_over_budget(&self) -> bool {
+        matches!(self.budget_usd, Some(cap) if self.cost_so_far_usd > cap)
     }
 
     pub fn record(&mut self, step_id: &str, out: StepOutput) {
@@ -117,8 +118,9 @@ mod tests {
     fn budget_unbounded_when_unset() {
         let mut ctx = RunContext::new(PathBuf::from("/tmp"));
         // 不设 budget,加任意多 cost 都不应 over
-        assert!(!ctx.add_cost_and_check(1000.0));
-        assert!(!ctx.add_cost_and_check(1.0));
+        ctx.add_cost(1000.0);
+        ctx.add_cost(1.0);
+        assert!(!ctx.is_over_budget());
         assert_eq!(ctx.cost_so_far_usd(), 1001.0);
     }
 
@@ -127,19 +129,23 @@ mod tests {
         let mut ctx = RunContext::new(PathBuf::from("/tmp"));
         ctx.set_budget(Some(1.0));
         // 刚好等于 cap 不触发(防浮点抖动)
-        assert!(!ctx.add_cost_and_check(1.0));
+        ctx.add_cost(1.0);
+        assert!(!ctx.is_over_budget());
         // 任何额外 cost 都触发
-        assert!(ctx.add_cost_and_check(0.001));
+        ctx.add_cost(0.001);
+        assert!(ctx.is_over_budget());
     }
 
     #[test]
     fn budget_ignores_negative_and_nan_delta() {
         let mut ctx = RunContext::new(PathBuf::from("/tmp"));
         ctx.set_budget(Some(1.0));
-        assert!(!ctx.add_cost_and_check(-5.0));
-        assert!(!ctx.add_cost_and_check(f64::NAN));
+        ctx.add_cost(-5.0);
+        ctx.add_cost(f64::NAN);
         assert_eq!(ctx.cost_so_far_usd(), 0.0, "脏 delta 不污染累计");
-        assert!(!ctx.add_cost_and_check(0.5));
+        assert!(!ctx.is_over_budget());
+        ctx.add_cost(0.5);
         assert_eq!(ctx.cost_so_far_usd(), 0.5);
+        assert!(!ctx.is_over_budget());
     }
 }

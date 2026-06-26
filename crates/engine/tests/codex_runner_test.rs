@@ -130,6 +130,41 @@ fn renders_suggestion_when_present_and_skips_na_placeholder() {
 }
 
 #[test]
+fn placeholder_suggestions_skip_recommend_line() {
+    // review-fix §D finding #14:占位词集合扩展 — "none" / "无" / "TBD" / "-" 都不应
+    // 渲染 "↳ 建议:" 行(防止噪音稀释下游 fixer 的真实 suggestion)。
+    let r = CodexRunner::new(fixture("stub-codex-placeholder-suggestion.sh"))
+        .review(
+            &CodexAction::ReviewMr,
+            None,
+            Some("HEAD"),
+            None,
+            None,
+            &mut |_: &str, _: Option<u32>| {},
+            &PathBuf::from("."),
+        )
+        .expect("review ok");
+    // 真 suggestion 渲染 ↳
+    assert!(r.findings.contains("↳ 建议: 用 X 替换 Y"), "真 suggestion 应渲染: {}", r.findings);
+    // 占位词集合(none/无/TBD/-)不应出现在 ↳ 行
+    let placeholder_arrows: Vec<&str> = r
+        .findings
+        .lines()
+        .filter(|l| l.contains("↳"))
+        .filter(|l| {
+            l.contains("none")
+                || l.contains("无 ")
+                || l.contains("TBD")
+                || l.trim().ends_with(": -")
+        })
+        .collect();
+    assert!(
+        placeholder_arrows.is_empty(),
+        "占位词不应渲染 ↳ 行: {placeholder_arrows:?}"
+    );
+}
+
+#[test]
 fn legacy_finding_without_suggestion_field_still_parses() {
     // 旧 fixture(stub-codex.sh)输出不含 suggestion 字段;serde default 给空串,
     // 渲染时按"无建议"跳过 ↳ 行,保持向后兼容。

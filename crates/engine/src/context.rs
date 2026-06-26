@@ -49,10 +49,21 @@ impl RunContext {
         }
     }
 
-    /// 设置 per-run USD 上限(Executor::new 调用)。负数 / NaN / 0 由 manifest validate 拦截,
-    /// 此处只接受 caller 已校验过的合法值。
+    /// 设置 per-run USD 上限。第二道防线:即使 caller 跳过 manifest.validate(),
+    /// 非正/非有限值在这里被静默落 None(配 stderr warn),is_over_budget() 永远 false
+    /// 等价"无上限"而非"silently 失效"。生产路径仍由 manifest.validate() 在 parse 期拦截。
     pub fn set_budget(&mut self, budget_usd: Option<f64>) {
-        self.budget_usd = budget_usd;
+        match budget_usd {
+            Some(b) if b.is_finite() && b > 0.0 => self.budget_usd = Some(b),
+            None => self.budget_usd = None,
+            Some(bad) => {
+                eprintln!(
+                    "[agentpipe] WARN: budget_usd={bad} 非正有限数,落为 None(无上限);\
+                     调用方应先跑 Manifest::validate() 拦截"
+                );
+                self.budget_usd = None;
+            }
+        }
     }
 
     pub fn cost_so_far_usd(&self) -> f64 {
@@ -65,9 +76,18 @@ impl RunContext {
 
     /// 累加一个 step 的成本。NaN / 负数 delta 被过滤(实测 claude 偶尔会输出 0,不应该出现负数),
     /// 防脏数据污染累计。返回累加**之后**的累计值,调用方可立刻 `is_over_budget()`。
+    ///
+    /// **可观测性**:遇到 NaN / 负数走 stderr warn(不静默吞 — review-fix §B),便于诊断
+    /// 上游 runner 退化(如新 ACP agent 解析 cost 出 bug 一直送 NaN 时 budget 守护
+    /// 形同虚设的反模式)。0.0 不算异常,无需 warn。
     pub fn add_cost(&mut self, delta_usd: f64) {
-        if delta_usd.is_finite() && delta_usd > 0.0 {
+        if delta_usd.is_finite() && delta_usd >= 0.0 {
             self.cost_so_far_usd += delta_usd;
+        } else {
+            eprintln!(
+                "[agentpipe] WARN: add_cost 丢弃无效 delta {delta_usd}(NaN/inf/负数),\
+                 上游 runner 可能输出了脏 cost_usd,请排查"
+            );
         }
     }
 

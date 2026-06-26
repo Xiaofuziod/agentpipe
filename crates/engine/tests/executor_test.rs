@@ -508,7 +508,11 @@ steps:
 #[test]
 fn budget_exceeded_aborts_run_at_first_overrun() {
     // stub-claude 每步 cost_usd = 0.01。budget = 0.005 < 0.01 → 第 1 个 claude step 完成后
-    // 累计 0.01 > 0.005 触发 over_budget,emit StepFailed + RunFinished{Aborted},第 2 步不跑。
+    // charge_and_check 触发 over budget,立刻 emit 单条 StepFailed("超出 USD budget...")
+    // + return Err → run() 主循环走 RunStatus::Aborted,第 2 步不启动。
+    //
+    // **不再双 emit**:新 spec(2026-06-26 review-findings-fix §C)语义是 charge 触发时只发
+    // StepFailed,不发 StepFinished —— 避免同一 step_id 既 Done 又 Failed 的矛盾终态。
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "clean");
     let yaml = r#"
@@ -536,19 +540,66 @@ steps:
     assert_eq!(status, RunStatus::Aborted, "超 budget 应走 Aborted,不是 Failed");
     let events: Vec<Event> = erx.try_iter().collect();
 
-    // 第 1 步必须 finished;第 2 步必须没启动(over_budget 在第 1 步 finish 后立即停)
-    let finished_first = events.iter().any(
-        |e| matches!(e, Event::StepFinished { step_id, status, .. } if step_id == "first" && *status == StepStatus::Done),
-    );
-    assert!(finished_first, "第 1 步必须正常 finish");
+    // 第 2 步必须没启动(charge 在第 1 步 spawn 后立即触发停)
     let started_second = events
         .iter()
         .any(|e| matches!(e, Event::StepStarted { step_id, .. } if step_id == "second"));
     assert!(!started_second, "第 2 步不该启动,实际事件: {events:?}");
 
-    // budget 错误必须有解释性 StepFailed
+    // budget 错误必须有解释性 StepFailed,且 step_id = "first"
     let budget_err = events.iter().any(|e| {
-        matches!(e, Event::StepFailed { error, .. } if error.contains("超出 USD budget"))
+        matches!(e, Event::StepFailed { step_id, error } if step_id == "first" && error.contains("超出 USD budget"))
     });
-    assert!(budget_err, "应 emit 含 '超出 USD budget' 的 StepFailed 事件");
+    assert!(budget_err, "应 emit 含 '超出 USD budget' 的 StepFailed 事件: {events:?}");
+
+    // 关键:第 1 步**不应**有 StepFinished{Done},charge 触发就停 —— 避免双 emit 矛盾终态。
+    let finished_first = events.iter().any(
+        |e| matches!(e, Event::StepFinished { step_id, status, .. } if step_id == "first" && *status == StepStatus::Done),
+    );
+    assert!(!finished_first, "charge 触发时不应 emit StepFinished(避免同 step_id 既 Done 又 Failed)");
+}
+
+#[test]
+fn budget_charges_each_verify_retry_attempt_and_verifier() {
+    // spec §3.1 主修复目标:verify-retry 中段每次 attempt + verifier cost 都入账,
+    // 不再只看末次 attempt 的 metrics(以前 finish 路径漏统计 N-1 次 attempt + verifier 全部)。
+    //
+    // stub-claude 每次返 cost=0.01,STUB_CLAUDE_RESULT="VERDICT: fail" 让 claude verifier 始终判
+    // 未通过 → 触发 retry。verify max_retries=2 / on_unmet=fail,即一个 step 最多跑 3 次干活 +
+    // 3 次 verifier = 6 次 claude.run。budget=0.045 → 第 5 次 charge 累计 0.05 > 0.045 触发 abort。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("STUB_VERDICT", "clean");
+    std::env::set_var("STUB_CLAUDE_RESULT", "VERDICT: fail");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+budget_usd: 0.045
+steps:
+  - id: do
+    kind: claude
+    prompt: "干活"
+    verify:
+      by: claude
+      prompt: "判定"
+      max_retries: 2
+      on_unmet: fail
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_ctx, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+    std::env::remove_var("STUB_CLAUDE_RESULT");
+
+    assert_eq!(status, RunStatus::Aborted, "verify-retry 中段触发 budget 应 Aborted");
+    let events: Vec<Event> = erx.try_iter().collect();
+    let budget_err = events.iter().any(|e| {
+        matches!(e, Event::StepFailed { step_id, error } if step_id == "do" && error.contains("超出 USD budget"))
+    });
+    assert!(
+        budget_err,
+        "verify-retry 中段必须能触发 budget StepFailed(否则 verifier/retry cost 全漏): {events:?}"
+    );
 }

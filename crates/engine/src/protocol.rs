@@ -93,4 +93,8 @@ pub enum Command {
 pub struct ReviewResult {
     pub verdict: Verdict,
     pub findings: String,
+    /// codex 本次 review 的成本/轮次/耗时。codex CLI 当前不输出 token usage,所以
+    /// 实际填 None;字段先就位让 verify_once 把 verifier cost 上报给 budget,等
+    /// codex CLI 升级输出 metrics 后直接填,无需再改 schema。
+    pub metrics: Option<StepMetrics>,
 }

@@ -29,6 +29,10 @@ pub struct Executor {
 }
 
 impl Executor {
+    /// **panics** if manifest fails validate() — Executor 不接受未验证 Manifest,
+    /// 防止 SDK / Tauri / 测试路径手工构造的 budget_usd=NaN 等绕过 CLI 入口的
+    /// 校验直接落到运行时(review-fix §B finding #3)。生产路径调用方通常已经在
+    /// CLI 早期 validate 过,此处是第二道兜底。
     pub fn new(
         manifest: Manifest,
         bins: RunnerBins,
@@ -36,6 +40,9 @@ impl Executor {
         events: Sender<Event>,
         commands: Receiver<Command>,
     ) -> Self {
+        manifest
+            .validate()
+            .expect("Manifest 必须先通过 validate() 才能交给 Executor");
         let mut ctx = RunContext::new(manifest.target.clone());
         ctx.set_budget(manifest.budget_usd);
         Self {
@@ -165,12 +172,16 @@ impl Executor {
                     match res {
                         Ok(out) => {
                             let summary = format!("verdict={:?}", out.verdict);
+                            // 先 charge:即使 codex 当前 metrics 始终 None(无 cost 上报),
+                            // 字段就位后未来升级直接生效。? 短路在超额时跳出 step。
+                            self.charge_and_check(&step.id, &out.metrics)?;
                             self.ctx.record(&step.id, StepOutput {
                                 findings: Some(out.findings),
                                 verdict: Some(out.verdict),
                                 ..Default::default()
                             });
-                            return self.finish(&step.id, summary, None);
+                            self.finish(&step.id, summary, out.metrics);
+                            return Ok(());
                         }
                         Err(e) => match self.handle_failure(&step.id, e.to_string()) {
                             StepDecision::Retry => continue,
@@ -212,6 +223,9 @@ impl Executor {
                     };
                     let metrics = out.metrics;
                     let answer = out.answer;
+                    // 每次 attempt 都 charge —— verify-retry 中段不再丢 cost(本 PR 主修)。
+                    // ? 短路:超额在末轮 attempt 末尾立刻停,不让下一次 retry 继续烧。
+                    self.charge_and_check(&step.id, &metrics)?;
                     self.ctx.record(&step.id, StepOutput {
                         artifact: Some(answer.clone()),
                         ..Default::default()
@@ -220,12 +234,15 @@ impl Executor {
                     // 无校验门 → 退出码即完成(原行为)
                     let v = match verify {
                         None => {
-                            return self.finish(&step.id, "done".into(), metrics);
+                            self.finish(&step.id, "done".into(), metrics);
+                            return Ok(());
                         }
                         Some(v) => v,
                     };
                     on_line("校验中…", None);
-                    let (verdict, findings) = self.verify_once(v, &mut on_line);
+                    let (verdict, findings, verifier_metrics) = self.verify_once(v, &mut on_line);
+                    // verifier 自身的 cost 也入账(spec §3.1:verifier 钱也要进 budget)。
+                    self.charge_and_check(&step.id, &verifier_metrics)?;
                     // 暴露 verifier findings 供下游 {{<id>.findings}} 引用
                     self.ctx.record(&step.id, StepOutput {
                         artifact: Some(answer.clone()),
@@ -234,7 +251,8 @@ impl Executor {
                     });
                     if matches!(verdict, Verdict::Clean) {
                         on_line("校验通过", None);
-                        return self.finish(&step.id, "done · 已校验".into(), metrics);
+                        self.finish(&step.id, "done · 已校验".into(), metrics);
+                        return Ok(());
                     }
                     // 未达成:还有重试预算就带反馈重跑
                     if attempt < v.max_retries {
@@ -246,10 +264,12 @@ impl Executor {
                     // 重试耗尽 → 升级策略
                     match v.on_unmet {
                         OnUnmet::Continue => {
-                            return self
-                                .finish(&step.id, "done · 未达标(continue)".into(), metrics);
+                            self.finish(&step.id, "done · 未达标(continue)".into(), metrics);
+                            return Ok(());
                         }
                         OnUnmet::Fail => {
+                            // cost 已经在每次 attempt + verifier 后 charge 过,此处 fail 路径
+                            // 直接 emit 失败事件不再补 charge(否则重复)。
                             self.fail(&step.id, format!("校验未通过(已重试 {} 次)", v.max_retries));
                             return Err(());
                         }
@@ -288,11 +308,13 @@ impl Executor {
                 loop {
                     match runner.run(&p, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd) {
                         Ok(out) => {
+                            self.charge_and_check(&step.id, &out.metrics)?;
                             self.ctx.record(&step.id, StepOutput {
                                 artifact: Some(out.answer.clone()),
                                 ..Default::default()
                             });
-                            return self.finish(&step.id, "done · acp".into(), out.metrics);
+                            self.finish(&step.id, "done · acp".into(), out.metrics);
+                            return Ok(());
                         }
                         Err(e) => match self.handle_failure(&step.id, e.to_string()) {
                             StepDecision::Retry => continue,
@@ -340,15 +362,21 @@ impl Executor {
         self.decision_gate(step_id, "step 失败,选择 重试 / 跳过 / 中止".into())
     }
 
-    /// 跑一次校验门,返回 (verdict, findings)。verifier 自身失败/不可解析一律
-    /// fail-closed 为 ChangesRequested(绝不静默判过)。
-    fn verify_once(&self, v: &Verify, on_line: &mut dyn FnMut(&str, Option<u32>)) -> (Verdict, String) {
+    /// 跑一次校验门,返回 (verdict, findings, metrics)。metrics 让上层把 verifier
+    /// 自身的 cost 也入账(spec §3.1 主目标:verifier 的钱也要进 budget)。verifier
+    /// 自身失败/不可解析一律 fail-closed 为 ChangesRequested(绝不静默判过)。
+    /// Command verifier 无 cost 概念,metrics 永远 None。
+    fn verify_once(
+        &self,
+        v: &Verify,
+        on_line: &mut dyn FnMut(&str, Option<u32>),
+    ) -> (Verdict, String, Option<StepMetrics>) {
         match v.by {
             Verifier::Codex => {
                 // action 必有(validate 已保证);防御性兜底 fail-closed。
                 let action = match &v.action {
                     Some(a) => a,
-                    None => return (Verdict::ChangesRequested, "verify codex 缺 action".into()),
+                    None => return (Verdict::ChangesRequested, "verify codex 缺 action".into(), None),
                 };
                 let path_i = v.path.as_ref().map(|p| self.ctx.interpolate(p));
                 let base_i = v.base.as_ref().map(|b| self.ctx.interpolate(b));
@@ -362,8 +390,8 @@ impl Executor {
                     on_line,
                     &self.ctx.cwd,
                 ) {
-                    Ok(out) => (out.verdict, out.findings),
-                    Err(e) => (Verdict::ChangesRequested, format!("校验执行失败: {e}")),
+                    Ok(out) => (out.verdict, out.findings, out.metrics),
+                    Err(e) => (Verdict::ChangesRequested, format!("校验执行失败: {e}"), None),
                 }
             }
             Verifier::Claude => {
@@ -380,17 +408,23 @@ impl Executor {
                     &self.ctx.cwd,
                     true, // verifier 只读(plan 模式)
                 ) {
-                    Ok(out) => (parse_verdict(&out.answer), out.answer),
-                    Err(e) => (Verdict::ChangesRequested, format!("校验执行失败: {e}")),
+                    Ok(out) => (parse_verdict(&out.answer), out.answer, out.metrics),
+                    Err(e) => (Verdict::ChangesRequested, format!("校验执行失败: {e}"), None),
                 }
             }
             Verifier::Command => {
                 let cmd = match &v.command {
                     Some(c) if !c.trim().is_empty() => c.as_str(),
-                    _ => return (Verdict::ChangesRequested, "verify command 缺 command 字段".into()),
+                    _ => return (Verdict::ChangesRequested, "verify command 缺 command 字段".into(), None),
                 };
                 on_line("校验命令…", None);
-                command_verdict(cmd, &self.ctx.cwd, self.control.as_ref(), &mut |l| on_line(l, None))
+                let (verdict, findings) = command_verdict(
+                    cmd,
+                    &self.ctx.cwd,
+                    self.control.as_ref(),
+                    &mut |l| on_line(l, None),
+                );
+                (verdict, findings, None)
             }
         }
     }
@@ -414,7 +448,8 @@ impl Executor {
                         ..Default::default()
                     },
                 );
-                return self.finish(&step.id, "approved (preset)".into(), None);
+                self.finish(&step.id, "approved (preset)".into(), None);
+                return Ok(());
             }
         }
         let _ = self.events.send(Event::StepAwaitingGate {
@@ -429,7 +464,8 @@ impl Executor {
                     artifact,
                     ..Default::default()
                 });
-                self.finish(&step.id, "approved".into(), None)
+                self.finish(&step.id, "approved".into(), None);
+                Ok(())
             }
             Ok(Command::SkipStep { .. }) => {
                 self.emit_skipped(&step.id);
@@ -498,33 +534,43 @@ impl Executor {
         }
     }
 
-    /// emit StepFinished + 累加 cost;若累加后超 budget,额外 emit StepFailed 说明原因。
-    /// 返回 Err(()) 直接转给 run_step 的 `?` 短路终止 step,避免 7 处 callsite 手动
-    /// `if over { Err } else { Ok }` 样板。over-budget 状态走 ctx.is_over_budget()
-    /// 单一源,run() 主循环也读它,不存 Executor 字段。
-    /// 见 docs/specs/2026-06-26-review-loop-budget-and-verdict-design.md §3.1。
-    fn finish(
-        &mut self,
-        step_id: &str,
-        summary: String,
-        metrics: Option<StepMetrics>,
-    ) -> Result<(), ()> {
-        // step 工作本身已完成 → 先 emit StepFinished,与改造前观察一致(避免 GUI / CLI 渲染顺序错位)。
-        let cost = metrics.as_ref().map(|m| m.cost_usd).unwrap_or(0.0);
+    /// 纯事件发射 — emit StepFinished{Done},不累加 cost、不判 budget。
+    /// budget 由 `charge_and_check` 在每个 spawn 点单独负责,避免 cost 只在
+    /// 末次 attempt finish 时入账(verify-retry / Fail 路径漏统计)。
+    fn finish(&self, step_id: &str, summary: String, metrics: Option<StepMetrics>) {
         let _ = self.events.send(Event::StepFinished {
             step_id: step_id.to_string(),
             status: StepStatus::Done,
             summary,
             metrics,
         });
+    }
+
+    /// 累加一次 spawn 的成本 + 立即判 budget。Err(()) 表示本次 charge 触发了超额,
+    /// callsite 应当 `?` 短路终止 step。在每次 claude.run / codex.review / verify_once
+    /// 拿到 Ok 后立即调用,确保 verify-retry 中段 / OnUnmet::Fail 路径的真实花费
+    /// 都入账(spec §3.1 反 LangChain $47K 类失控的核心保证)。
+    ///
+    /// over-budget 时只 emit 一条 StepFailed(step 工作虽然完成,但 run 必须停),不
+    /// 双 emit StepFinished+StepFailed —— 由调用方决定是否补 finish(charge 失败
+    /// 即 ? 短路,通常 caller 不会再走到 finish)。
+    fn charge_and_check(
+        &mut self,
+        step_id: &str,
+        metrics: &Option<StepMetrics>,
+    ) -> Result<(), ()> {
+        let cost = metrics.as_ref().map(|m| m.cost_usd).unwrap_or(0.0);
         self.ctx.add_cost(cost);
         if self.ctx.is_over_budget() {
             let spent = self.ctx.cost_so_far_usd();
-            let cap = self.ctx.budget_usd().unwrap_or(f64::NAN);
+            let cap = self
+                .ctx
+                .budget_usd()
+                .expect("is_over_budget guarantees Some");
             let _ = self.events.send(Event::StepFailed {
                 step_id: step_id.to_string(),
                 error: format!(
-                    "超出 USD budget (累计 ${spent:.4} > 上限 ${cap:.4} after step '{step_id}')"
+                    "超出 USD budget (累计 ${spent:.4} > 上限 ${cap:.4} during step '{step_id}')"
                 ),
             });
             return Err(());

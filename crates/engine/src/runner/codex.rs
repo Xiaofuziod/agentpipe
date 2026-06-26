@@ -11,8 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// review prompt 共用尾巴:要求 reviewer 为每个 finding 给具体可执行 suggestion。
-/// 两处 prompt 共用,避免漂移(spec §3.2)。
-const SUGGESTION_HINT: &str = "。每个 finding 必须提供 suggestion 字段:具体可执行的修改建议(例:'第 42 行 nil 检查改成 if let Some(x) = y { ... }' / '把 unwrap 改为 ? 传播');无具体建议则填 \"N/A\"";
+/// 两处 prompt 共用,避免漂移(spec §3.2)。**自带前后空格 + 句号**,与调用方
+/// prompt 拼接时不产生双标点(review-fix §D finding #13)。
+const SUGGESTION_HINT: &str = " 每个 finding 可选提供 suggestion 字段:具体可执行的修改建议(例:'第 42 行 nil 检查改成 if let Some(x) = y { ... }' / '把 unwrap 改为 ? 传播');无具体建议时省略或填 \"N/A\"。";
 
 /// codex review 单次墙钟上限(秒)。挂死 / provider 失联时到点 kill 整组,
 /// review() 返回 Err 走 step 失败决策门,绝不冻住整个 run。可经
@@ -35,16 +36,16 @@ struct RawReview {
 
 #[derive(Deserialize)]
 struct RawFinding {
-    #[serde(default)]
+    // 核心字段去 #[serde(default)]:与 REVIEW_SCHEMA required 对齐;缺失即整条解析
+    // 失败,走 fallback ChangesRequested(review-fix §D finding #7 治本,不再静默
+    // 渲染 "[] :0 " 乱码喂下游 fixer)。
     severity: String,
-    #[serde(default)]
     file: String,
-    #[serde(default)]
     line: i64,
-    #[serde(default)]
     summary: String,
     /// 具体修改建议(spec §3.2),提升下游 fixer 的可操作性。
-    /// 旧 codex 二进制 / 旧 fixture 无此字段时 serde 给空串,渲染时按"无建议"处理。
+    /// optional:旧 codex 二进制不输出时 serde 给空串,渲染时按"无建议"处理。
+    /// (review-fix §D:从 required 改 optional,与 spec §3.2「向后兼容」对齐)
     #[serde(default)]
     suggestion: String,
 }
@@ -191,12 +192,23 @@ fn base_ref_resolvable(cwd: &Path, base: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 单条 finding 渲染为人读行;suggestion 非空且非占位("N/A" 大小写不敏感)时附加
-/// "↳ 建议: ..." 行,让下游 fixer prompt 直接看到可操作建议(spec §3.2)。
+/// 占位词集合(reviewer 在没具体建议时常用的同义表达);trim 后小写匹配。
+/// review-fix §D finding #14:仅 "N/A" 太窄 — 模型实际多用 'none' / '无' / 'tbd' /
+/// 'todo' 等;这些都不渲染 ↳ 行,避免噪音稀释真实 suggestion。
+const SUGGESTION_PLACEHOLDERS: &[&str] = &["n/a", "none", "无", "tbd", "todo", "no", "-"];
+
+fn is_placeholder_suggestion(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    let lower_trim = lower.trim();
+    SUGGESTION_PLACEHOLDERS.contains(&lower_trim)
+}
+
+/// 单条 finding 渲染为人读行;suggestion 非空且非占位时附加 "↳ 建议: ..." 行,
+/// 让下游 fixer prompt 直接看到可操作建议(spec §3.2)。
 fn render_finding(f: &RawFinding) -> String {
     let head = format!("[{}] {}:{} {}", f.severity, f.file, f.line, f.summary);
     let s = f.suggestion.trim();
-    if s.is_empty() || s.eq_ignore_ascii_case("n/a") {
+    if s.is_empty() || is_placeholder_suggestion(s) {
         head
     } else {
         format!("{head}\n  ↳ 建议: {s}")
@@ -204,6 +216,7 @@ fn render_finding(f: &RawFinding) -> String {
 }
 
 /// RawReview → ReviewResult(verdict 归一 + findings 扁平化)。解析两路共用,避免漂移。
+/// metrics 始终 None:codex CLI 不在 stdout 输出 token usage,等升级后填。
 fn raw_to_result(raw: RawReview) -> ReviewResult {
     let verdict = if raw.verdict == "clean" {
         Verdict::Clean
@@ -216,7 +229,7 @@ fn raw_to_result(raw: RawReview) -> ReviewResult {
         .map(render_finding)
         .collect::<Vec<_>>()
         .join("\n");
-    ReviewResult { verdict, findings }
+    ReviewResult { verdict, findings, metrics: None }
 }
 
 /// 从 codex stdout 抓最后一条能解析成 schema 的 JSON 行。无则 None(交给 -o fallback)。
@@ -248,6 +261,7 @@ fn parse_review(out_file: &Path) -> ReviewResult {
     let fallback = ReviewResult {
         verdict: Verdict::ChangesRequested,
         findings: "(无法解析 Codex 输出,按需修改处理)".into(),
+        metrics: None,
     };
     let content = match std::fs::read_to_string(out_file) {
         Ok(c) => c,
@@ -262,9 +276,12 @@ fn parse_review(out_file: &Path) -> ReviewResult {
 // 必须是严格 JSON Schema:OpenAI 结构化输出要求每个 object 带 additionalProperties:false
 // 且所有属性进 required,否则 API 报 invalid_json_schema(实测,见 cli-behavior-findings.md)。
 //
-// suggestion 字段(spec §3.2):要求 reviewer 为每个 finding 给具体修改建议(无则填 "N/A")。
-// 提升下游 fixer 反馈深度。旧 codex 二进制不识别此字段时 OpenAI 端可能 reject;若发现
-// 真实兼容问题,fallback 路径(parse_review)走 ChangesRequested + 占位 findings 不假成功。
+// suggestion 字段(spec §3.2):reviewer 提供具体修改建议,提升下游 fixer 反馈深度。
+// **从 required 改为 optional**(review-fix §D 修订):严格 required 会让旧 codex 二进制
+// 在 OpenAI 端被 reject 整次 review → fallback 给假 verdict 触发 loop 活锁;改 optional
+// 后旧 codex 仍能输出 verdict+findings,新 codex 输出 suggestion 直接被渲染,与 spec
+// §3.2「向后兼容」承诺对齐。OpenAI strict schema 仍能保证 suggestion 字段类型正确,
+// 只是不强制必须有。RawFinding 的 #[serde(default)] 兜底缺字段 → 空串 → 占位过滤。
 const REVIEW_SCHEMA: &str = r#"{
   "type":"object","additionalProperties":false,
   "required":["verdict","findings"],
@@ -272,7 +289,7 @@ const REVIEW_SCHEMA: &str = r#"{
     "verdict":{"type":"string","enum":["clean","changes_requested"]},
     "findings":{"type":"array","items":{
       "type":"object","additionalProperties":false,
-      "required":["severity","file","line","summary","suggestion"],
+      "required":["severity","file","line","summary"],
       "properties":{
         "severity":{"type":"string"},"file":{"type":"string"},
         "line":{"type":"integer"},"summary":{"type":"string"},

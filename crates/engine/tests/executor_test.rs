@@ -22,6 +22,24 @@ fn stub_bins() -> RunnerBins {
     }
 }
 
+/// RAII 守护:测试退出(正常或 panic)时自动 remove_var,防止跨测试污染。
+/// review-2 §C finding #10:之前 std::env::remove_var(...) 在 ex.run() 之后,
+/// panic 跳过清理 → 同进程后续抢到 ENV_LOCK 的测试看到泄漏的 env var。
+struct EnvGuard(&'static str);
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        std::env::set_var(key, value);
+        Self(key)
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        std::env::remove_var(self.0);
+    }
+}
+
 #[test]
 fn runs_simple_codex_then_claude_in_auto_mode() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -206,10 +224,17 @@ steps:
         .filter(|e| matches!(e, Event::StepStarted { step_id, .. } if step_id == "rev"))
         .count();
     assert_eq!(rev_starts, 1, "base 缺失应首轮即 fail-loud,不空转");
-    assert!(
-        !events.iter().any(|e| matches!(e, Event::LoopMaxReached { .. })),
-        "fail-loud 不应跑到 max"
-    );
+    // 注:review-2 §E finding #11 后,sub-step Err 透传时 run_loop 复用 LoopMaxReached
+    // 作"loop 因外因停止"信号(避免新 Event 变体跨端代价)。max 字段反映触发时的实际
+    // iteration 数,与 manifest max=5 不同,可借此区分"跑满"vs"中段停"。
+    let loop_max_reached: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::LoopMaxReached { max, .. } => Some(*max),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(loop_max_reached, vec![1], "应在第 1 次 iteration 中段 emit LoopMaxReached{{max=1}},而非跑满 max=5");
 }
 
 /// 跑一个带 verify 的单 claude step,返回收到的事件流。
@@ -560,6 +585,53 @@ steps:
 }
 
 #[test]
+fn step_finished_metrics_include_verifier_cost_not_just_last_attempt() {
+    // review-2 §B 主修目标(finding #2 + #5 + #7):StepFinished.metrics 必须反映该 step
+    // 内**所有** spawn 的累加成本(attempt + verifier),而非只末次 attempt 一份;否则
+    // audit::aggregate_cost 和 GUI total cost 系统性低估。
+    //
+    // stub-claude 每次返 cost=0.01;Claude step + Claude verify(verdict=pass 一次过)→
+    // 应当 cumulate 1 attempt + 1 verifier = 0.02。改造前只看到 0.01。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _v = EnvGuard::set("STUB_VERDICT", "clean");
+    let _r = EnvGuard::set("STUB_CLAUDE_RESULT", "VERDICT: pass");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: do
+    kind: claude
+    prompt: "干活"
+    verify:
+      by: claude
+      prompt: "判定"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_ctx, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+
+    assert_eq!(status, RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    let metrics = events.iter().find_map(|e| match e {
+        Event::StepFinished { step_id, metrics: Some(m), .. } if step_id == "do" => Some(m.clone()),
+        _ => None,
+    });
+    let m = metrics.expect("StepFinished 应带 metrics");
+    // 1 attempt + 1 verifier × 0.01 = 0.02。改造前只看到 0.01。
+    assert!(
+        (m.cost_usd - 0.02).abs() < 1e-9,
+        "StepFinished metrics 应累积 attempt+verifier cost,期望 0.02,实际 {}",
+        m.cost_usd
+    );
+    // num_turns 同样累加(stub 每次返 1)
+    assert_eq!(m.num_turns, 2, "num_turns 应累加 attempt+verifier");
+}
+
+#[test]
 fn budget_charges_each_verify_retry_attempt_and_verifier() {
     // spec §3.1 主修复目标:verify-retry 中段每次 attempt + verifier cost 都入账,
     // 不再只看末次 attempt 的 metrics(以前 finish 路径漏统计 N-1 次 attempt + verifier 全部)。
@@ -568,8 +640,8 @@ fn budget_charges_each_verify_retry_attempt_and_verifier() {
     // 未通过 → 触发 retry。verify max_retries=2 / on_unmet=fail,即一个 step 最多跑 3 次干活 +
     // 3 次 verifier = 6 次 claude.run。budget=0.045 → 第 5 次 charge 累计 0.05 > 0.045 触发 abort。
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    std::env::set_var("STUB_VERDICT", "clean");
-    std::env::set_var("STUB_CLAUDE_RESULT", "VERDICT: fail");
+    let _v = EnvGuard::set("STUB_VERDICT", "clean");
+    let _r = EnvGuard::set("STUB_CLAUDE_RESULT", "VERDICT: fail");
     let yaml = r#"
 version: 1
 name: t
@@ -591,7 +663,6 @@ steps:
     let (_ctx, crx) = mpsc::channel::<Command>();
     let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
     let status = ex.run();
-    std::env::remove_var("STUB_CLAUDE_RESULT");
 
     assert_eq!(status, RunStatus::Aborted, "verify-retry 中段触发 budget 应 Aborted");
     let events: Vec<Event> = erx.try_iter().collect();

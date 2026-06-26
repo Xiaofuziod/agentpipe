@@ -146,21 +146,56 @@ fn placeholder_suggestions_skip_recommend_line() {
         .expect("review ok");
     // 真 suggestion 渲染 ↳
     assert!(r.findings.contains("↳ 建议: 用 X 替换 Y"), "真 suggestion 应渲染: {}", r.findings);
-    // 占位词集合(none/无/TBD/-)不应出现在 ↳ 行
+    // 占位词集合(none / 无 / TBD)不应出现在 ↳ 行。
+    // 注:review-2 §C finding #4 修正 — 用 ends_with(": <占位>") 锚定后缀,
+    // 之前 l.contains("无 ")(尾随空格)与实际渲染 "  ↳ 建议: 无"(末尾无字符)永不匹配,
+    // 测试假绿。同时占位集合在 review-2 §D finding #9 收窄(删 no/-/todo)后,这里
+    // 只验剩下的 n/a / none / 无 / tbd 四类。
     let placeholder_arrows: Vec<&str> = r
         .findings
         .lines()
         .filter(|l| l.contains("↳"))
         .filter(|l| {
-            l.contains("none")
-                || l.contains("无 ")
-                || l.contains("TBD")
-                || l.trim().ends_with(": -")
+            let t = l.trim_end();
+            t.ends_with(": none")
+                || t.ends_with(": 无")
+                || t.ends_with(": TBD")
+                || t.ends_with(": tbd")
         })
         .collect();
     assert!(
         placeholder_arrows.is_empty(),
         "占位词不应渲染 ↳ 行: {placeholder_arrows:?}"
+    );
+}
+
+#[test]
+fn malformed_finding_missing_core_field_falls_back_to_changes_requested() {
+    // review-2 §D finding #8:RawFinding 去 #[serde(default)] 后,缺核心字段(此处
+    // severity)整次解析失败 → fallback `(无法解析 Codex 输出,按需修改处理)`,
+    // 而非静默渲染 "[] :0 summary" 乱码喂下游 fixer。
+    let r = CodexRunner::new(fixture("stub-codex-malformed-finding.sh"))
+        .review(
+            &CodexAction::ReviewMr,
+            None,
+            Some("HEAD"),
+            None,
+            None,
+            &mut |_: &str, _: Option<u32>| {},
+            &PathBuf::from("."),
+        )
+        .expect("review ok(走 fallback,不抛 Err)");
+    assert_eq!(r.verdict, Verdict::ChangesRequested, "缺字段必须 fail-closed");
+    assert!(
+        r.findings.contains("无法解析"),
+        "fallback findings 必须明示解析失败,可观测: {}",
+        r.findings
+    );
+    // 关键:绝对不能渲染出 "[] :0 缺 severity 字段" 这种乱码
+    assert!(
+        !r.findings.contains("缺 severity 字段"),
+        "缺字段时不应静默渲染部分字段(防 review-fix §D #7 残留): {}",
+        r.findings
     );
 }
 

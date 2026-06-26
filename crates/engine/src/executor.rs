@@ -29,23 +29,20 @@ pub struct Executor {
 }
 
 impl Executor {
-    /// **panics** if manifest fails validate() — Executor 不接受未验证 Manifest,
-    /// 防止 SDK / Tauri / 测试路径手工构造的 budget_usd=NaN 等绕过 CLI 入口的
-    /// 校验直接落到运行时(review-fix §B finding #3)。生产路径调用方通常已经在
-    /// CLI 早期 validate 过,此处是第二道兜底。
-    pub fn new(
+    /// 返回 Result 的构造器(review-2 §E finding #12 修正):库 API 不该在构造器
+    /// 内 panic,SDK 嵌入时整线程崩。CLI / Tauri 已显式 validate,这里再 validate
+    /// 一次是第二道兜底 — 返 Err 让 caller 决定如何上报(GUI 弹错误 / CLI 退出码)。
+    pub fn try_new(
         manifest: Manifest,
         bins: RunnerBins,
         control: Arc<Control>,
         events: Sender<Event>,
         commands: Receiver<Command>,
-    ) -> Self {
-        manifest
-            .validate()
-            .expect("Manifest 必须先通过 validate() 才能交给 Executor");
+    ) -> Result<Self, crate::error::EngineError> {
+        manifest.validate()?;
         let mut ctx = RunContext::new(manifest.target.clone());
         ctx.set_budget(manifest.budget_usd);
-        Self {
+        Ok(Self {
             claude: ClaudeRunner::new(bins.claude),
             codex: CodexRunner::new(bins.codex),
             manifest,
@@ -53,7 +50,20 @@ impl Executor {
             control,
             events,
             commands,
-        }
+        })
+    }
+
+    /// 兼容旧 callsite 的薄 wrapper:`try_new(...).expect(...)`。
+    /// CLI/Tauri 主路径已 validate,此 expect 实际不会触发;测试路径 panic 同旧行为。
+    pub fn new(
+        manifest: Manifest,
+        bins: RunnerBins,
+        control: Arc<Control>,
+        events: Sender<Event>,
+        commands: Receiver<Command>,
+    ) -> Self {
+        Self::try_new(manifest, bins, control, events, commands)
+            .expect("Manifest 必须先通过 validate() 才能交给 Executor")
     }
 
     pub fn run(&mut self) -> RunStatus {
@@ -198,6 +208,9 @@ impl Executor {
                 let mut on_line = self.progress_sink(&step.id);
                 let mut attempt = 0u32; // 校验重试计数(与失败重试独立)
                 let mut feedback: Option<String> = None;
+                // 累积该 step 内所有 attempt + verifier 的 metrics(review-2 §B finding #2/#7)。
+                // finish 拿到的是 cumulative 而非末次 attempt,审计 / GUI 总 cost 不再低估。
+                let mut step_metrics: Option<StepMetrics> = None;
                 loop {
                     let mut p = self.ctx.interpolate(prompt);
                     if let Some(f) = &feedback {
@@ -226,6 +239,7 @@ impl Executor {
                     // 每次 attempt 都 charge —— verify-retry 中段不再丢 cost(本 PR 主修)。
                     // ? 短路:超额在末轮 attempt 末尾立刻停,不让下一次 retry 继续烧。
                     self.charge_and_check(&step.id, &metrics)?;
+                    step_metrics = Self::sum_metrics(step_metrics, metrics);
                     self.ctx.record(&step.id, StepOutput {
                         artifact: Some(answer.clone()),
                         ..Default::default()
@@ -234,7 +248,7 @@ impl Executor {
                     // 无校验门 → 退出码即完成(原行为)
                     let v = match verify {
                         None => {
-                            self.finish(&step.id, "done".into(), metrics);
+                            self.finish(&step.id, "done".into(), step_metrics);
                             return Ok(());
                         }
                         Some(v) => v,
@@ -243,6 +257,7 @@ impl Executor {
                     let (verdict, findings, verifier_metrics) = self.verify_once(v, &mut on_line);
                     // verifier 自身的 cost 也入账(spec §3.1:verifier 钱也要进 budget)。
                     self.charge_and_check(&step.id, &verifier_metrics)?;
+                    step_metrics = Self::sum_metrics(step_metrics, verifier_metrics);
                     // 暴露 verifier findings 供下游 {{<id>.findings}} 引用
                     self.ctx.record(&step.id, StepOutput {
                         artifact: Some(answer.clone()),
@@ -251,7 +266,7 @@ impl Executor {
                     });
                     if matches!(verdict, Verdict::Clean) {
                         on_line("校验通过", None);
-                        self.finish(&step.id, "done · 已校验".into(), metrics);
+                        self.finish(&step.id, "done · 已校验".into(), step_metrics);
                         return Ok(());
                     }
                     // 未达成:还有重试预算就带反馈重跑
@@ -264,12 +279,14 @@ impl Executor {
                     // 重试耗尽 → 升级策略
                     match v.on_unmet {
                         OnUnmet::Continue => {
-                            self.finish(&step.id, "done · 未达标(continue)".into(), metrics);
+                            self.finish(&step.id, "done · 未达标(continue)".into(), step_metrics);
                             return Ok(());
                         }
                         OnUnmet::Fail => {
                             // cost 已经在每次 attempt + verifier 后 charge 过,此处 fail 路径
-                            // 直接 emit 失败事件不再补 charge(否则重复)。
+                            // 直接 emit 失败事件不再补 charge(否则重复)。step_metrics 走 fail
+                            // 路径就丢失了 — 这是 Result::Err 自然语义,audit 看不到失败 step 的
+                            // cost 是已知 trade-off(review-2 §B doc note)。
                             self.fail(&step.id, format!("校验未通过(已重试 {} 次)", v.max_retries));
                             return Err(());
                         }
@@ -481,6 +498,13 @@ impl Executor {
     fn run_loop(&mut self, loop_id: &str, until: &str, max: u32, body: &[Step], gated: bool) -> Result<(), ()> {
         for n in 1..=max {
             if self.control.is_aborted() {
+                // 控制中止:emit LoopMaxReached 让 GUI loop 视图收尾(review-2 §E
+                // finding #11 — 复用现有 variant,语义降级为「loop 因外因停止」,避免
+                // 加新 Event 变体的跨端同步代价)。
+                let _ = self.events.send(Event::LoopMaxReached {
+                    loop_id: loop_id.into(),
+                    max: n.saturating_sub(1),
+                });
                 return Err(());
             }
             let _ = self.events.send(Event::LoopIteration {
@@ -488,7 +512,15 @@ impl Executor {
                 iteration: n,
             });
             for sub in body {
-                self.run_step(sub, gated)?;
+                if self.run_step(sub, gated).is_err() {
+                    // sub-step charge_and_check Err / 决策门 Abort / 控制中止 → 透传 Err 前
+                    // 补 LoopMaxReached 收尾,与上方控制中止路径同形(review-2 §E #11)。
+                    let _ = self.events.send(Event::LoopMaxReached {
+                        loop_id: loop_id.into(),
+                        max: n,
+                    });
+                    return Err(());
+                }
             }
             if self.eval_until(until, body) {
                 let _ = self.events.send(Event::LoopConverged {
@@ -544,6 +576,22 @@ impl Executor {
             summary,
             metrics,
         });
+    }
+
+    /// 累加两份 metrics 的 num_turns / duration_ms / cost_usd;任一为 None 直接返另一个。
+    /// 用于 Claude verify-retry 路径:把所有 attempt + verifier 的 metrics 在 step 内
+    /// 累积,让 StepFinished 携带的 metrics 反映该 step 的**全部**花费(review-2 §B 修
+    /// audit/UI cost 漏统计:之前 finish 只传末次 attempt 一份,verifier 与早期 attempt
+    /// 全部不进 emit,与 ctx.cost_so_far_usd 的实际累计不一致)。
+    fn sum_metrics(a: Option<StepMetrics>, b: Option<StepMetrics>) -> Option<StepMetrics> {
+        match (a, b) {
+            (None, x) | (x, None) => x,
+            (Some(a), Some(b)) => Some(StepMetrics {
+                num_turns: a.num_turns + b.num_turns,
+                duration_ms: a.duration_ms + b.duration_ms,
+                cost_usd: a.cost_usd + b.cost_usd,
+            }),
+        }
     }
 
     /// 累加一次 spawn 的成本 + 立即判 budget。Err(()) 表示本次 charge 触发了超额,

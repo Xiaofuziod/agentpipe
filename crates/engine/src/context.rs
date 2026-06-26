@@ -49,21 +49,20 @@ impl RunContext {
         }
     }
 
-    /// 设置 per-run USD 上限。第二道防线:即使 caller 跳过 manifest.validate(),
-    /// 非正/非有限值在这里被静默落 None(配 stderr warn),is_over_budget() 永远 false
-    /// 等价"无上限"而非"silently 失效"。生产路径仍由 manifest.validate() 在 parse 期拦截。
+    /// 设置 per-run USD 上限。**fail-loud**:非正/非有限值 panic(与 Executor::new 的
+    /// manifest.validate().expect 同形,保持 safety-fail-closed 基线)。
+    /// review-2 §C finding #3 修正:之前 silently 落 None 是 fail-OPEN 反「budget 是钱
+    /// 类安全字段、默认 fail-closed」基线 — LangChain $47K 反模式正中靶心。生产路径
+    /// 走 manifest.validate() → Executor::new → set_budget,合法值唯一来源,该 panic
+    /// 实际不会被合法 caller 触发,只在测试 / SDK 误用时立刻报错。
     pub fn set_budget(&mut self, budget_usd: Option<f64>) {
-        match budget_usd {
-            Some(b) if b.is_finite() && b > 0.0 => self.budget_usd = Some(b),
-            None => self.budget_usd = None,
-            Some(bad) => {
-                eprintln!(
-                    "[agentpipe] WARN: budget_usd={bad} 非正有限数,落为 None(无上限);\
-                     调用方应先跑 Manifest::validate() 拦截"
-                );
-                self.budget_usd = None;
-            }
+        if let Some(b) = budget_usd {
+            assert!(
+                b.is_finite() && b > 0.0,
+                "set_budget: budget_usd={b} 必须为正有限数(应先 Manifest::validate)"
+            );
         }
+        self.budget_usd = budget_usd;
     }
 
     pub fn cost_so_far_usd(&self) -> f64 {

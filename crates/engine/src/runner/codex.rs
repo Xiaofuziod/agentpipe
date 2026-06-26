@@ -11,9 +11,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// review prompt 共用尾巴:要求 reviewer 为每个 finding 给具体可执行 suggestion。
-/// 两处 prompt 共用,避免漂移(spec §3.2)。**自带前后空格 + 句号**,与调用方
-/// prompt 拼接时不产生双标点(review-fix §D finding #13)。
-const SUGGESTION_HINT: &str = " 每个 finding 可选提供 suggestion 字段:具体可执行的修改建议(例:'第 42 行 nil 检查改成 if let Some(x) = y { ... }' / '把 unwrap 改为 ? 传播');无具体建议时省略或填 \"N/A\"。";
+/// 两处 prompt 共用,避免漂移(spec §3.2)。**自带前导空格 + 句号收尾**,与调用方
+/// prompt 拼接时不产生双标点;**强约束「必须提供」** 保留模型动机(review-2 §A
+/// finding #6:避免「可选」措辞让 LLM 走最省路径默认略过)。
+const SUGGESTION_HINT: &str = " 每个 finding **必须**提供 suggestion 字段:具体可执行的修改建议(例:'第 42 行 nil 检查改成 if let Some(x) = y { ... }' / '把 unwrap 改为 ? 传播');无具体建议时填 \"N/A\"。";
 
 /// codex review 单次墙钟上限(秒)。挂死 / provider 失联时到点 kill 整组,
 /// review() 返回 Err 走 step 失败决策门,绝不冻住整个 run。可经
@@ -192,15 +193,16 @@ fn base_ref_resolvable(cwd: &Path, base: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// 占位词集合(reviewer 在没具体建议时常用的同义表达);trim 后小写匹配。
-/// review-fix §D finding #14:仅 "N/A" 太窄 — 模型实际多用 'none' / '无' / 'tbd' /
-/// 'todo' 等;这些都不渲染 ↳ 行,避免噪音稀释真实 suggestion。
-const SUGGESTION_PLACEHOLDERS: &[&str] = &["n/a", "none", "无", "tbd", "todo", "no", "-"];
+/// 占位词集合(reviewer 在没具体建议时常用的同义表达);整串(已 trim)小写匹配。
+/// **收窄于 review-2 §D finding #9**:删 "no" / "-" / "todo" — code review 上下文
+/// 这些常是合法短建议("No, use X instead" 被截 / 'TODO: 抽 helper' 简写 / markdown
+/// 列表 '- xxx' 残留),整串等值匹配会误吞真实建议。保留高置信占位:n/a / none / 无 / tbd。
+const SUGGESTION_PLACEHOLDERS: &[&str] = &["n/a", "none", "无", "tbd"];
 
+/// caller(render_finding)已 trim 输入,此处只 to_lowercase 即可(review-2 §D
+/// finding #13:删冗余 inner trim)。
 fn is_placeholder_suggestion(s: &str) -> bool {
-    let lower = s.to_lowercase();
-    let lower_trim = lower.trim();
-    SUGGESTION_PLACEHOLDERS.contains(&lower_trim)
+    SUGGESTION_PLACEHOLDERS.contains(&s.to_lowercase().as_str())
 }
 
 /// 单条 finding 渲染为人读行;suggestion 非空且非占位时附加 "↳ 建议: ..." 行,
@@ -274,14 +276,14 @@ fn parse_review(out_file: &Path) -> ReviewResult {
 }
 
 // 必须是严格 JSON Schema:OpenAI 结构化输出要求每个 object 带 additionalProperties:false
-// 且所有属性进 required,否则 API 报 invalid_json_schema(实测,见 cli-behavior-findings.md)。
+// 且所有属性进 required,否则 API 报 invalid_json_schema(实测,见 docs/specs/cli-behavior-findings.md:18)。
 //
 // suggestion 字段(spec §3.2):reviewer 提供具体修改建议,提升下游 fixer 反馈深度。
-// **从 required 改为 optional**(review-fix §D 修订):严格 required 会让旧 codex 二进制
-// 在 OpenAI 端被 reject 整次 review → fallback 给假 verdict 触发 loop 活锁;改 optional
-// 后旧 codex 仍能输出 verdict+findings,新 codex 输出 suggestion 直接被渲染,与 spec
-// §3.2「向后兼容」承诺对齐。OpenAI strict schema 仍能保证 suggestion 字段类型正确,
-// 只是不强制必须有。RawFinding 的 #[serde(default)] 兜底缺字段 → 空串 → 占位过滤。
+// **必填**(review-2 §A finding #1 修正):上一轮把 suggestion 从 required 移出与「所有
+// properties 必须 required」OpenAI 约束冲突,真实 codex 调用会被 422 invalid_json_schema
+// reject 触发 loop 活锁。现回归 required;旧 codex 二进制不支持新 schema 时直接报错(用户
+// 责任升级 codex,与 agentpipe 锁版本策略一致 — spec §3.2 follow-up:文档明示 min codex)。
+// RawFinding.suggestion 仍 #[serde(default)] 兜底解析端(mock fixture / 边缘 JSON)。
 const REVIEW_SCHEMA: &str = r#"{
   "type":"object","additionalProperties":false,
   "required":["verdict","findings"],
@@ -289,7 +291,7 @@ const REVIEW_SCHEMA: &str = r#"{
     "verdict":{"type":"string","enum":["clean","changes_requested"]},
     "findings":{"type":"array","items":{
       "type":"object","additionalProperties":false,
-      "required":["severity","file","line","summary"],
+      "required":["severity","file","line","summary","suggestion"],
       "properties":{
         "severity":{"type":"string"},"file":{"type":"string"},
         "line":{"type":"integer"},"summary":{"type":"string"},

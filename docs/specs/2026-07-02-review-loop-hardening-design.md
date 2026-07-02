@@ -123,7 +123,7 @@ converged =
 
 第 1 轮该段为空串(prompt 尾部一个孤立标题,LLM 可无害忽略;引擎不做模板条件渲染,保持插值语义简单)。
 
-**上限**:history 不截断(max=10 轮 × 典型 findings 几 KB,在 claude 上下文预算内);若未来出现超长 findings 再加尾部截断,不预建。
+**上限**:history 不截断(max=10 轮 × 典型 findings 几 KB,在 claude 上下文预算内)。注意 P1 的 Retry 会以 max 为步长延长轮数(history 随之变长),但每次延长都过人工决策门,总量仍受人控;若未来出现超长 findings 再加尾部截断,不预建。
 
 ### 3.5 P6:收敛短路(锚点后立即 eval)
 
@@ -177,5 +177,5 @@ converged =
   - P3:vet 开启 + stub 二次输出裁剪 findings → 结果被替换;vet 调用失败 → 保留首轮;clean 首轮 → 不触发 vet(stub 断言只调一次)。
   - P4:同 id 三轮 record → history 含前两轮、带轮次分隔;直线 step history 空;`{{x.history}}` 插值正确。
   - P6:review 首轮即 clean → fix step 收到 Skipped、LoopConverged 在 fix 之前;未收敛轮 fix 正常跑。
-- 模板 `mr-review-loop.yaml` 用 stub 跑通(demo 流程回归)。
+- `demo/demo-task.yaml` 用 stub 跑通(README Quickstart 流程回归;mr-review-loop 含需人工贴 MR 链接的 human step,不适合 headless 回归,validate 通过即可)。
 - 本 spec 与执行文档入仓。

@@ -167,7 +167,12 @@ self.ctx.record(&step.id, StepOutput {
 });
 ```
 
-注意 `out.findings` 被 move,`items` 取值须在其前(按上面字段序即可,`out.verdict` 是 Copy 无碍;实际写时以编译器为准)。run_loop 的 LoopConverged emit 处补 `residual: 0`(占位,Task 2 换 residual_count)。verify_once 的 `Ok(out) => (out.verdict, out.findings, out.metrics)` 不动(verify 门不消费 items)。
+(不同字段各自 partial move 合法;`summary` 在此之前已借用过 `out.verdict`,顺序不能倒。)run_loop 的 LoopConverged emit 处补 `residual: 0`(占位,Task 2 换 residual_count)。verify_once 的 `Ok(out) => (out.verdict, out.findings, out.metrics)` 不动(verify 门不消费 items)。
+
+**LoopConverged 加字段的全 workspace 编译波及**(workspace members 含 src-tauri):
+
+- `crates/cli/src/render.rs` 的 `Event::LoopConverged { loop_id, iterations }` 模式缺字段即 E0027,本 Task 先补成 `Event::LoopConverged { loop_id, iterations, .. }` 保编译,Task 6 再实现渲染。
+- src-tauri 只对 `RunStarted / RunFinished / StepFinished` 做模式匹配(bridge.rs / commands.rs,已核),LoopConverged 不受影响,零改动。
 
 - [ ] **Step 5: 单测(codex.rs 内联 #[cfg(test)] mod)**
 
@@ -780,16 +785,18 @@ git commit -m "feat(engine): loop 支持 allow_residual severity 阈值收敛(fa
 
 - [ ] **Step 1: stub 加调用计数(默认零行为变化)**
 
-tests/fixtures/stub-codex.sh 在 verdict/severity 行后加:
+tests/fixtures/stub-codex.sh 的变量段改为如下**最终合成态**(注意保留 Task 3 加的 `STUB_FINDINGS` 覆盖能力,不得写死 findings 把它抹掉 —— 否则 Task 3 的空 items 测试回归失败):
 
 ```bash
+verdict="${STUB_VERDICT:-changes_requested}"
+severity="${STUB_SEVERITY:-high}"
+findings="${STUB_FINDINGS:-[{\"severity\":\"$severity\",\"file\":\"a.rs\",\"line\":10,\"summary\":\"示例问题\",\"suggestion\":\"N/A\"}]}"
 # vet 测试用调用计数:STUB_COUNT_FILE 未设时 n=1,存量测试零影响。
 n=1
 if [ -n "${STUB_COUNT_FILE:-}" ]; then
   n=$(( $(cat "$STUB_COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
   echo "$n" > "$STUB_COUNT_FILE"
 fi
-findings="[{\"severity\":\"$severity\",\"file\":\"a.rs\",\"line\":10,\"summary\":\"示例问题\",\"suggestion\":\"N/A\"}]"
 if [ "$n" -ge 2 ]; then
   if [ "${STUB_FAIL_ON_CALL_2:-}" = "1" ]; then echo "vet boom" >&2; exit 1; fi
   verdict="${STUB_VERDICT_2:-clean}"
@@ -799,8 +806,6 @@ cat > "$out" <<EOF
 {"verdict":"$verdict","findings":$findings}
 EOF
 ```
-
-(原 heredoc 里的 findings 数组改用 `$findings` 变量。)
 
 - [ ] **Step 2: 写失败测试**
 
@@ -983,6 +988,8 @@ fn vet_pass(
 ```
 
 executor.rs 两处调用点:`StepKind::Codex` 分支解构加 `vet`,`self.codex.review(action, path_i.as_deref(), base_i.as_deref(), prompt_i.as_deref(), *vet, ...)`;verify_once 的 Verifier::Codex 传 `false`(verify 门不做 vet,YAGNI,注释注明)。
+
+**签名变更波及的存量调用点**:`crates/engine/tests/codex_runner_test.rs` 现有若干 `runner.review(...)` 调用(如 :318 附近)全部在 `ask_prompt` 参数后补 `false`,逐个 grep `\.review(` 核对,漏一个即编译红。
 
 - [ ] **Step 4: 跑测 + clippy**
 

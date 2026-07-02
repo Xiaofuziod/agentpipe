@@ -212,4 +212,28 @@ describe("runReducer", () => {
     expect(s.log.length).toBeLessThanOrEqual(1000);
     expect(s.log[s.log.length - 1]).toContain("line-1199");
   });
+
+  it("LoopConverged 带 residual 时结果文案含残留数", () => {
+    let s = initialRunState();
+    s = runReducer(s, { type: "LoopConverged", loop_id: "l", iterations: 2, residual: 3 });
+    expect(s.loops["l"].result).toContain("残留 3");
+  });
+
+  it("LoopConverged 无 residual(老日志)回退纯收敛文案", () => {
+    let s = initialRunState();
+    s = runReducer(s, { type: "LoopConverged", loop_id: "l", iterations: 2 });
+    expect(s.loops["l"].result).toBe("收敛");
+  });
+
+  it("无 StepStarted 的 StepFinished(Skipped) upsert 出可见条目", () => {
+    // P1 Skip(loop_id)与 P6 短路跳过都会产生 Finished-without-Started;
+    // setStep 是 upsert(runReducer.ts:57-63,`?? { status: "Pending" }` + order 补插),
+    // 本测试钉死这个容错语义防未来回退。
+    let s = initialRunState();
+    s = runReducer(s, {
+      type: "StepFinished", step_id: "fix", status: "Skipped", summary: "loop 已收敛,跳过",
+    });
+    expect(s.steps["fix"].status).toBe("Skipped");
+    expect(s.order).toContain("fix");
+  });
 });

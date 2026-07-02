@@ -121,8 +121,11 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
       return { ...prev, worktreeError: e.error, log: pushLog(prev.log, `✗ worktree: ${e.error}`) };
     case "LoopIteration":
       return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iteration } } };
-    case "LoopConverged":
-      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iterations, result: "收敛" } } };
+    case "LoopConverged": {
+      const residual = e.residual ?? 0;
+      const result = residual > 0 ? `收敛(残留 ${residual})` : "收敛";
+      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iterations, result } } };
+    }
     case "LoopMaxReached": {
       // review §A finding #15:按 reason 分三档文案,旧版统一「到上限未干净」会把
       // 外部 Abort 与 sub-step 失败误报成「跑到 max」(iteration=0 时尤其无意义)。

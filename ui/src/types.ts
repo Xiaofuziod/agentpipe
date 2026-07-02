@@ -47,7 +47,7 @@ export type EngineEvent =
   | { type: "WorktreeReady"; path: string; branch: string }
   | { type: "WorktreeFailed"; error: string }
   | { type: "LoopIteration"; loop_id: string; iteration: number }
-  | { type: "LoopConverged"; loop_id: string; iterations: number }
+  | { type: "LoopConverged"; loop_id: string; iterations: number; residual?: number }
   | { type: "LoopMaxReached"; loop_id: string; max: number; reason?: LoopEndReason }
   | { type: "RunFinished"; status: RunStatus };
 

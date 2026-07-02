@@ -1070,3 +1070,45 @@ steps:
     assert!(!events.iter().any(|e| matches!(e, Event::LoopConverged { .. })),
         "items 空 + 非 clean 绝不能收敛(fail-closed)");
 }
+
+/// P4 端到端:loop 第 2 轮 fix prompt 里 {{rev.history}} 展开为第 1 轮 findings。
+/// 可观测面:tests/fixtures/stub-claude.sh 的 assistant 行回显 "STUB CLAUDE 收到: <prompt压扁>",
+/// 经 StreamParser derive_label → StepProgress.line,但 label 截断 60 字符 ——
+/// 所以 fix prompt 故意写短("H:{{rev.history}}"),保证 "第 1 轮" 落在截断窗口内。
+#[test]
+fn fix_prompt_receives_history_on_second_round() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 2
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: HEAD
+      - id: fix
+        kind: claude
+        prompt: "H:{{rev.history}}"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let fix_lines: Vec<String> = erx.try_iter().filter_map(|e| match e {
+        Event::StepProgress { step_id, line, .. } if step_id == "fix" => Some(line),
+        _ => None,
+    }).collect();
+    // 第 1 轮 history 空("STUB CLAUDE 收到: H:"),第 2 轮含第 1 轮 findings 头
+    assert!(fix_lines.iter().any(|l| l.contains("第 1 轮")),
+        "第 2 轮 fix prompt 必须展开 history,实际 progress 行: {fix_lines:?}");
+}

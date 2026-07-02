@@ -195,6 +195,8 @@ impl Executor {
                             // = 单次 out.metrics(实际目前 None,等 codex CLI 升级)。
                             self.charge(&out.metrics);
                             self.check_budget(&step.id, &out.metrics)?;
+                            // P4:record 覆盖前把上一轮 findings 归档,{{<id>.history}} 供 fix prompt 防振荡
+                            self.ctx.archive_findings(&step.id);
                             self.ctx.record(&step.id, StepOutput {
                                 findings: Some(out.findings),
                                 verdict: Some(out.verdict),

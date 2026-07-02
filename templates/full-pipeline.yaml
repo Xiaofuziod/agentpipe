@@ -41,7 +41,7 @@ steps:
         base: "{{base.artifact}}"  # 由上方 base step 从 MR 元信息动态解析
       - id: apply-feedback
         kind: claude
-        prompt: "按 Codex 反馈修改并提交:{{codex-review-mr.findings}}"
+        prompt: "按 Codex 反馈修改并提交:{{codex-review-mr.findings}}\n\n此前轮次已反馈过的问题(参考,避免来回改 / 重复修;为空表示首轮):\n{{codex-review-mr.history}}"
   - id: memorize
     kind: claude
     prompt: "总结本轮任务需要被记录的点(踩坑/约定/关键设计决策),按记忆规范存入记忆并更新记忆索引"

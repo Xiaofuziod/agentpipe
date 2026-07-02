@@ -44,7 +44,7 @@ steps:
       # 3 / 5. 把 Codex 找到的问题交给 Claude 修复并提交回该 MR 分支
       - id: fix
         kind: claude
-        prompt: "按 Codex 对 MR {{mr.artifact}} 的审查反馈,逐条修复后提交并 push 到该 MR 分支。若反馈为空或无需改动,则不做任何改动直接结束本步。\n\nCodex 反馈:\n{{review.findings}}"
+        prompt: "按 Codex 对 MR {{mr.artifact}} 的审查反馈,逐条修复后提交并 push 到该 MR 分支。若反馈为空或无需改动,则不做任何改动直接结束本步。\n\nCodex 反馈:\n{{review.findings}}\n\n此前轮次 Codex 已反馈过的问题(参考,避免来回改 / 重复修;为空表示首轮):\n{{review.history}}"
 
   # 收尾:Codex 已审到干净
   - id: done

@@ -65,6 +65,9 @@ pub struct RunContext {
     cost_so_far_usd: f64,
     /// manifest 配置的 USD 上限;None = 不限。累计严格大于上限即 over budget。
     budget_usd: Option<f64>,
+    /// loop 内同 id 重跑的历史 findings(按轮次顺序追加);直线 step 恒无历史。
+    /// 供 `{{id.history}}` 插值,让 fix prompt 看到此前已反馈过的问题防振荡。
+    histories: HashMap<String, Vec<String>>,
 }
 
 impl RunContext {
@@ -74,6 +77,7 @@ impl RunContext {
             outputs: HashMap::new(),
             cost_so_far_usd: 0.0,
             budget_usd: None,
+            histories: HashMap::new(),
         }
     }
 
@@ -147,6 +151,31 @@ impl RunContext {
         self.outputs.get(step_id)
     }
 
+    /// 把 step 现有非空 findings 归档进历史。executor 在 codex step record 新结果前调用;
+    /// 只有 loop 内同 id 重跑才会累积,直线 step 恒无历史。
+    pub fn archive_findings(&mut self, step_id: &str) {
+        if let Some(f) = self.get(step_id).and_then(|o| o.findings.clone()) {
+            if !f.trim().is_empty() {
+                self.histories.entry(step_id.to_string()).or_default().push(f);
+            }
+        }
+    }
+
+    /// 渲染 step 的历史轮次 findings(不含当前轮);无历史 → None。
+    fn history(&self, step_id: &str) -> Option<String> {
+        let h = self.histories.get(step_id)?;
+        if h.is_empty() {
+            return None;
+        }
+        Some(
+            h.iter()
+                .enumerate()
+                .map(|(i, f)| format!("── 第 {} 轮 ──\n{f}", i + 1))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        )
+    }
+
     /// 替换所有 {{step-id.field}};未知引用替换为空串。
     pub fn interpolate(&self, template: &str) -> String {
         let mut result = String::with_capacity(template.len());
@@ -158,7 +187,13 @@ impl RunContext {
                 let token = after[..end].trim();
                 let value = token
                     .split_once('.')
-                    .and_then(|(id, field)| self.get(id).and_then(|o| o.field(field)))
+                    .and_then(|(id, field)| {
+                        if field == "history" {
+                            self.history(id)
+                        } else {
+                            self.get(id).and_then(|o| o.field(field))
+                        }
+                    })
                     .unwrap_or_default();
                 result.push_str(&value);
                 rest = &after[end + 2..];

@@ -129,7 +129,12 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
       };
     }
     case "StepFailed":
-      return { ...prev, ...setStep(prev, e.step_id, { status: "Failed", error: e.error }) };
+      // 失败也带上已烧掉的花费(budget 触发 / verifier 重试耗尽路径的 cumulative
+      // metrics),与 StepFinished 同形,CLI 渲染同步修(codex review P3)。
+      return {
+        ...prev,
+        ...setStep(prev, e.step_id, { status: "Failed", error: e.error, metrics: e.metrics ?? undefined }),
+      };
     case "WorktreeReady":
       return {
         ...prev,

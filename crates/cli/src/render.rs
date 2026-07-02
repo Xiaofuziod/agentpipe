@@ -66,7 +66,16 @@ pub fn render_event(event: &Event) -> String {
                 .unwrap_or_default();
             format!("  {mark} {step_id}: {summary}{m}")
         }
-        Event::StepFailed { step_id, error, .. } => format!("  ✗ {step_id}: {error}"),
+        Event::StepFailed { step_id, error, metrics } => {
+            // 失败也展示已烧掉的花费:budget 触发 / OnUnmet::Fail 的 StepFailed 携带
+            // cumulative metrics(审计已入账),只报 error 不报 spend 会让用户看不到
+            // "花了多少钱之后才死的"(codex review P3),与上方 StepFinished 同形。
+            let m = metrics
+                .as_ref()
+                .map(|m| format!(" · {}", format_metrics(m.num_turns, m.duration_ms, m.cost_usd)))
+                .unwrap_or_default();
+            format!("  ✗ {step_id}: {error}{m}")
+        }
         Event::WorktreeReady { path, branch } => format!("  ⑂ worktree: {branch} @ {path}"),
         Event::WorktreeFailed { error } => format!("  ✗ worktree failed: {error}"),
         Event::LoopIteration { loop_id, iteration } => format!("  ↻ {loop_id} round {iteration}"),
@@ -114,6 +123,20 @@ mod tests {
             metrics: Some(StepMetrics { num_turns: 7, duration_ms: 41200, cost_usd: 0.83 }),
         };
         assert_eq!(render_event(&e), "  ✓ impl: done · 7 turns · 41.2s · $0.83");
+    }
+
+    #[test]
+    fn renders_failed_with_metrics() {
+        // codex review P3 回归:budget / verifier 重试耗尽的失败带 cumulative metrics,
+        // 渲染必须展示已烧掉的花费;无 metrics 的失败保持旧文案。
+        let e = Event::StepFailed {
+            step_id: "impl".into(),
+            error: "超出 USD budget".into(),
+            metrics: Some(StepMetrics { num_turns: 7, duration_ms: 41200, cost_usd: 0.83 }),
+        };
+        assert_eq!(render_event(&e), "  ✗ impl: 超出 USD budget · 7 turns · 41.2s · $0.83");
+        let bare = Event::StepFailed { step_id: "impl".into(), error: "boom".into(), metrics: None };
+        assert_eq!(render_event(&bare), "  ✗ impl: boom");
     }
 
     #[test]

@@ -225,6 +225,18 @@ describe("runReducer", () => {
     expect(s.loops["l"].result).toBe("收敛");
   });
 
+  it("StepFailed 带 metrics 时入 steps(失败也展示已烧掉的花费)", () => {
+    let s = initialRunState();
+    s = runReducer(s, {
+      type: "StepFailed",
+      step_id: "impl",
+      error: "超出 USD budget",
+      metrics: { num_turns: 7, duration_ms: 41200, cost_usd: 0.83 },
+    });
+    expect(s.steps["impl"].status).toBe("Failed");
+    expect(s.steps["impl"].metrics?.cost_usd).toBe(0.83);
+  });
+
   it("loop 决策门(AwaitingGate/Skipped 复用 loop_id)只更新 loops,不进入扁平 step 流(F3)", () => {
     let s = initialRunState();
     // 对照 executor.rs run_loop:跑满 max 轮 → LoopMaxReached → decision_gate 发

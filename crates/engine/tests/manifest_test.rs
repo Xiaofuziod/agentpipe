@@ -256,3 +256,19 @@ fn loop_allow_residual_absent_not_serialized() {
     let out = serde_yml::to_string(&m).unwrap();
     assert!(!out.contains("allow_residual"), "缺省不应序列化:\n{out}");
 }
+
+#[test]
+fn codex_vet_rejects_ask_action() {
+    let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: q\n    kind: codex\n    action: ask\n    prompt: \"hi\"\n    vet: true\n";
+    let m = Manifest::parse(y).unwrap();
+    let err = m.validate().unwrap_err();
+    assert!(err.to_string().contains("vet"), "err = {err}");
+}
+
+#[test]
+fn codex_vet_absent_not_serialized() {
+    let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: r\n    kind: codex\n    action: review-mr\n    base: HEAD\n";
+    let m = Manifest::parse(y).unwrap();
+    let out = serde_yml::to_string(&m).unwrap();
+    assert!(!out.contains("vet"), "false 不应序列化:\n{out}");
+}

@@ -167,7 +167,7 @@ impl Executor {
         }
 
         match &step.kind {
-            StepKind::Codex { action, path, base, prompt } => {
+            StepKind::Codex { action, path, base, prompt, vet } => {
                 // 标识符类字段(base 分支名 / 文件路径)走 interpolate_identifier:
                 // 模板用 {{xxx.artifact}} 动态解析时,LLM artifact 常带前后空白 / 多行 /
                 // 末尾换行(尤其指令"只输出 X"也未必严格遵守)。引擎统一 trim 取首行非空,
@@ -182,6 +182,7 @@ impl Executor {
                         path_i.as_deref(),
                         base_i.as_deref(),
                         prompt_i.as_deref(),
+                        *vet,
                         Some(self.control.as_ref()),
                         &mut on_line,
                         &self.ctx.cwd,
@@ -451,6 +452,7 @@ impl Executor {
                     path_i.as_deref(),
                     base_i.as_deref(),
                     prompt_i.as_deref(),
+                    false, // verify 门不做 vet(YAGNI):verify 已是校验语义,再核验校验属过度设计
                     Some(self.control.as_ref()),
                     on_line,
                     &self.ctx.cwd,

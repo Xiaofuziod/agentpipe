@@ -1,11 +1,28 @@
 use agentpipe_engine::context::Verdict;
 use agentpipe_engine::manifest::CodexAction;
 use agentpipe_engine::runner::codex::CodexRunner;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 // STUB_VERDICT 是进程级 env,并行测试需串行化避免竞态。
 static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+/// env 变量的 RAII 清理:测试结束(含 panic 展开)自动 remove_var,避免残留污染
+/// 后续测试(与 executor_test.rs 同款 helper)。
+struct EnvGuard(&'static str);
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        std::env::set_var(key, value);
+        Self(key)
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        std::env::remove_var(self.0);
+    }
+}
 
 fn fixture(name: &str) -> String {
     format!("{}/../../tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
@@ -20,7 +37,7 @@ fn parses_changes_requested() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "changes_requested");
     let r = stub()
-        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
         .expect("review ok");
     assert_eq!(r.verdict, Verdict::ChangesRequested);
     assert!(r.findings.contains("示例问题"));
@@ -31,7 +48,7 @@ fn parses_clean() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "clean");
     let r = stub()
-        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
         .unwrap();
     assert_eq!(r.verdict, Verdict::Clean);
 }
@@ -43,7 +60,7 @@ fn parses_verdict_from_stdout_when_no_output_file() {
     // 引擎必须能从 stdout 解析出 verdict,而不是因 -o 缺失 fail-closed 成 changes_requested。
     std::env::set_var("STUB_VERDICT", "clean");
     let r = CodexRunner::new(fixture("stub-codex-stdout.sh"))
-        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
         .expect("review ok");
     assert_eq!(r.verdict, Verdict::Clean);
 }
@@ -56,6 +73,7 @@ fn review_times_out_and_errors() {
         None,
         Some("HEAD"),
         None,
+        false,
         None,
         &mut |_: &str, _: Option<u32>| {},
         &PathBuf::from("."),
@@ -76,6 +94,7 @@ fn review_mr_errors_when_base_ref_missing() {
         None,
         Some("agentpipe-nonexistent-base-ref"),
         None,
+        false,
         None,
         &mut |_: &str, _: Option<u32>| {},
         &PathBuf::from("."),
@@ -93,7 +112,7 @@ fn unparseable_output_is_changes_requested() {
     // 注入会产出非法 JSON 的 verdict,校验 fail-closed
     std::env::set_var("STUB_VERDICT", "\"broken");
     let r = stub()
-        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
         .unwrap();
     assert_eq!(r.verdict, Verdict::ChangesRequested);
 }
@@ -108,6 +127,7 @@ fn renders_suggestion_when_present_and_skips_na_placeholder() {
             None,
             Some("HEAD"),
             None,
+            false,
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -139,6 +159,7 @@ fn placeholder_suggestions_skip_recommend_line() {
             None,
             Some("HEAD"),
             None,
+            false,
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -180,6 +201,7 @@ fn malformed_finding_missing_core_field_falls_back_to_changes_requested() {
             None,
             Some("HEAD"),
             None,
+            false,
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -215,6 +237,7 @@ fn review_mr_errors_when_base_is_none() {
         None,
         None, // base 缺省
         None,
+        false,
         None,
         &mut |_: &str, _: Option<u32>| {},
         &PathBuf::from("."),
@@ -238,6 +261,7 @@ fn review_mr_rejects_base_with_whitespace_or_newline() {
         None,
         Some("main\n  extra"), // 多行 + 空白
         None,
+        false,
         None,
         &mut |_: &str, _: Option<u32>| {},
         &PathBuf::from("."),
@@ -262,6 +286,7 @@ fn review_mr_rejects_dash_prefixed_base_ref_fail_loud() {
             None,
             Some("--help"),
             None,
+            false,
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -321,6 +346,7 @@ echo "done"
             None,
             Some("HEAD"),
             None,
+            false,
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -337,4 +363,50 @@ echo "done"
         r.findings
     );
     let _ = std::fs::remove_file(&stub_path);
+}
+
+/// vet 开启 + 首轮 changes_requested → 第 2 次调用(vet)返回 clean 空 findings,
+/// 结果被替换 → verdict clean。
+#[test]
+fn vet_replaces_result_when_all_refuted() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let count = std::env::temp_dir().join(format!("ap-vet-count-{}", std::process::id()));
+    let _ = std::fs::remove_file(&count);
+    let _c = EnvGuard::set("STUB_COUNT_FILE", count.to_str().unwrap());
+    let runner = CodexRunner::new(fixture("stub-codex.sh"));
+    let r = runner.review(&CodexAction::ReviewMr, None, Some("HEAD"), None, true,
+                          None, &mut |_l, _r| {}, Path::new(".")).unwrap();
+    assert!(matches!(r.verdict, Verdict::Clean), "vet 全驳回应翻 clean");
+    assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2", "必须恰好调 2 次");
+}
+
+/// vet 调用失败(exit 1)→ 保留首轮结果(fail-closed 不丢 review 信号)。
+#[test]
+fn vet_failure_keeps_first_result() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let _f = EnvGuard::set("STUB_FAIL_ON_CALL_2", "1");
+    let count = std::env::temp_dir().join(format!("ap-vet-fail-{}", std::process::id()));
+    let _ = std::fs::remove_file(&count);
+    let _c = EnvGuard::set("STUB_COUNT_FILE", count.to_str().unwrap());
+    let runner = CodexRunner::new(fixture("stub-codex.sh"));
+    let r = runner.review(&CodexAction::ReviewMr, None, Some("HEAD"), None, true,
+                          None, &mut |_l, _r| {}, Path::new(".")).unwrap();
+    assert!(matches!(r.verdict, Verdict::ChangesRequested));
+    assert!(r.findings.contains("示例问题"), "首轮 findings 必须保留");
+}
+
+/// clean 首轮不触发 vet(恰好 1 次调用)。
+#[test]
+fn vet_not_triggered_on_clean() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "clean");
+    let count = std::env::temp_dir().join(format!("ap-vet-clean-{}", std::process::id()));
+    let _ = std::fs::remove_file(&count);
+    let _c = EnvGuard::set("STUB_COUNT_FILE", count.to_str().unwrap());
+    let runner = CodexRunner::new(fixture("stub-codex.sh"));
+    let _ = runner.review(&CodexAction::ReviewMr, None, Some("HEAD"), None, true,
+                          None, &mut |_l, _r| {}, Path::new(".")).unwrap();
+    assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
 }

@@ -81,6 +81,7 @@ impl CodexRunner {
         doc_path: Option<&str>,
         base: Option<&str>,
         ask_prompt: Option<&str>,
+        vet: bool,
         control: Option<&Control>,
         on_progress: &mut dyn FnMut(&str, Option<u32>),
         cwd: &Path,
@@ -209,7 +210,18 @@ impl CodexRunner {
         // 真实 codex(v0.139.0)把最终结构化结果打到 stdout、不写 -o(--output-last-message)文件。
         // 故 stdout 优先:取最后一条能解析成 schema 的 JSON 行;读 -o 文件作 fallback
         // (stub / 旧 codex 路径,parse_review 自带"无法解析"兜底)。
-        let result = parse_review_stdout(&stdout).unwrap_or_else(|| parse_review(&out_file));
+        let mut result = parse_review_stdout(&stdout).unwrap_or_else(|| parse_review(&out_file));
+
+        // P3(spec §3.3):自反驳核验。仅非 clean 且有结构化 items 时触发(fallback 路径
+        // items 空,无从核起,保留原样);核验失败保留首轮 —— fail-closed 方向是"不丢
+        // review 信号,宁可多修不可漏修"。
+        if vet && matches!(result.verdict, Verdict::ChangesRequested) && !result.items.is_empty() {
+            on_progress("核验 findings(自反驳)…", None);
+            match self.vet_pass(&result, control, on_progress, cwd) {
+                Ok(vetted) => result = vetted,
+                Err(e) => on_progress(&format!("核验失败,保留原 findings: {e}"), None),
+            }
+        }
 
         // 用户裁决(2026-06-26):review/fix 每轮要看到详情。把结构化 verdict + 渲染好
         // 的 findings 作为 progress 行追发,UI 展开 step 输出就能直接看到完整审查结果
@@ -217,6 +229,49 @@ impl CodexRunner {
         emit_findings_summary(&result, &mut |line| on_progress(line, None));
 
         Ok(result)
+    }
+
+    /// 二次 read-only codex 调用:逐条复核首轮 findings。输出不可解析 → Err
+    /// (caller 保留首轮,不同于 review 主路径的 fallback-ChangesRequested 语义:
+    /// vet 的 fallback 若替换首轮,等于用"无法解析"占位符抹掉真实 findings)。
+    fn vet_pass(
+        &self,
+        first: &ReviewResult,
+        control: Option<&Control>,
+        on_progress: &mut dyn FnMut(&str, Option<u32>),
+        cwd: &Path,
+    ) -> Result<ReviewResult, EngineError> {
+        let seq = OUT_SEQ.fetch_add(1, Ordering::Relaxed);
+        let out_file = std::env::temp_dir()
+            .join(format!("agentpipe-codex-vet-{}-{}.json", std::process::id(), seq));
+        let out_str = out_file.to_string_lossy().to_string();
+        let schema = write_schema()?;
+        let prompt = format!(
+            "以下是你刚对当前工作区给出的 code review findings。逐条重新到代码里核实:\
+             尝试用具体代码证据反驳每一条;删除证据不足、误读或幻觉的条目,保留确认成立的。\
+             驳回必须给出代码证据,不确定时保留。按 schema 重新输出最终 verdict 和 findings{SUGGESTION_HINT}\n\n{}",
+            first.findings
+        );
+        let args: Vec<String> = vec![
+            "exec".into(), "-s".into(), "read-only".into(),
+            "--output-schema".into(), schema,
+            "-o".into(), out_str,
+            prompt,
+        ];
+        let mut raw_sink = |line: &str| on_progress(line, None);
+        let started = std::time::Instant::now();
+        let (stdout, success) = run_command(
+            &self.bin, &args, cwd, None, Some(self.timeout_secs), control, &mut raw_sink,
+        )?;
+        if !success && started.elapsed() >= std::time::Duration::from_secs(self.timeout_secs) {
+            return Err(EngineError::Cli(format!("Codex 核验超时(>{}s),已中止", self.timeout_secs)));
+        }
+        if !success {
+            return Err(EngineError::Cli("Codex 核验进程非零退出".into()));
+        }
+        parse_review_stdout(&stdout)
+            .or_else(|| parse_review_file(&out_file))
+            .ok_or_else(|| EngineError::Cli("Codex 核验输出不可解析".into()))
     }
 }
 

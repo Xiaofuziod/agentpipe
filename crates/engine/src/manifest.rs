@@ -59,6 +59,11 @@ pub enum StepKind {
         base: Option<String>,
         #[serde(default)]
         prompt: Option<String>,
+        /// 可选自反驳核验:review 结果非 clean 时追加一次 read-only codex 调用,
+        /// 逐条用代码证据复核 findings,误报在喂给下游 fixer 前被过滤。
+        /// 仅 review-mr / review-doc;ask 配 vet 被 validate 拒绝。
+        #[serde(default, skip_serializing_if = "is_false")]
+        vet: bool,
     },
     Human {
         instruction: String,
@@ -261,12 +266,16 @@ impl Manifest {
                 }
                 Ok(())
             }
-            StepKind::Codex {
-                action,
-                path,
-                base,
-                prompt,
-            } => Self::validate_codex_fields(&step.id, "codex", action, path, base, prompt),
+            StepKind::Codex { action, path, base, prompt, vet } => {
+                Self::validate_codex_fields(&step.id, "codex", action, path, base, prompt)?;
+                if *vet && *action == CodexAction::Ask {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': vet 仅支持 review-mr / review-doc(ask 无结构化 findings 可核)",
+                        step.id
+                    )));
+                }
+                Ok(())
+            }
             StepKind::Loop { body, until, allow_residual, .. } => {
                 if until != "codex-clean" {
                     return Err(EngineError::Validation(format!(

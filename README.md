@@ -32,7 +32,9 @@ Try the full flow with **no API calls** using the bundled stub binaries — this
 ```bash
 # the empty commit gives the repo a resolvable `main` ref — review-mr's base-ref
 # check (fail-loud by design) needs at least one commit to diff against.
-mkdir -p /tmp/ap-demo/repo && (cd /tmp/ap-demo/repo && git init -q && git -c user.name=demo -c user.email=demo@example.com commit --allow-empty -q -m init)
+# `-b main` pins the branch name: demo-task.yaml reviews against `main`, and on
+# machines where `init.defaultBranch` is unset git would create `master` instead.
+mkdir -p /tmp/ap-demo/repo && (cd /tmp/ap-demo/repo && git init -q -b main && git -c user.name=demo -c user.email=demo@example.com commit --allow-empty -q -m init)
 AGENTPIPE_CLAUDE_BIN=$PWD/demo/stub-claude.sh \
 AGENTPIPE_CODEX_BIN=$PWD/demo/stub-codex.sh \
 AGENTPIPE_HOME=/tmp/ap-demo \

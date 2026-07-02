@@ -142,6 +142,32 @@ fn abort_mid_stream_returns_promptly() {
 }
 
 #[test]
+fn abort_during_chatty_stream_returns_promptly() {
+    // codex review P2 回归:fast_stream 每 10ms 一 chunk,比主线程 100ms 轮询间隔
+    // 密得多,recv_timeout 永远命中 Ok 分支 —— 修复前 abort 只在 Timeout 分支检查,
+    // 高频输出会把中止压到 agent 跑完(~30s)才响应;修复后循环头每轮检查,≤3s 返回。
+    ensure_mock_built();
+    let control = Arc::new(Control::default());
+    let control_for_aborter = control.clone();
+    let aborter = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(1500));
+        control_for_aborter.request_abort();
+    });
+
+    let started = Instant::now();
+    let (res, _progress) = run_scenario_full("fast_stream", "go", 60, Some(&control));
+    let elapsed = started.elapsed();
+    aborter.join().unwrap();
+
+    let err = res.expect_err("abort 后必须返回错误");
+    assert!(err.contains("中止"), "错误信息应说明被中止: {err}");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "高频输出下 abort 响应仍应 ≤ 3s,实际 {elapsed:?}"
+    );
+}
+
+#[test]
 fn fs_reverse_request_is_rejected_without_hang() {
     // mock 在 prompt 内主动发反向 fs/read_text_file;client MVP 不声明 fs capability,
     // SDK 应当返回 method_not_found 类错误。mock 忽略错误后继续发 "ok" chunk 并 EndTurn,

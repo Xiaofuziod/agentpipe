@@ -184,17 +184,19 @@ impl AcpRunner {
 
             // ── 主线程:drain 进度 + 轮询 abort ──
             loop {
+                // abort 检查放在每轮循环头,不论上一轮是 drain 到行还是超时:高频输出
+                // 的 agent 会让 recv_timeout 永远命中 Ok 分支,若只在 Timeout 分支查
+                // abort,输出越密集越停不下来 —— 直到 agent 安静/跑完/长超时才响应
+                // (codex review P2)。notify_waiters 幂等,重复调用无副作用;worker
+                // 收到后返回 abort Err → 释放 progress_tx → 此处 Disconnected 退出。
+                if let Some(c) = control {
+                    if c.is_aborted() {
+                        abort_notify.notify_waiters();
+                    }
+                }
                 match progress_rx.recv_timeout(Duration::from_millis(MAIN_POLL_INTERVAL_MS)) {
                     Ok(line) => on_progress(&line, None),
-                    Err(RecvTimeoutError::Timeout) => {
-                        if let Some(c) = control {
-                            if c.is_aborted() {
-                                // 事件驱动通知 worker:notify_waiters 唤醒 select! 的
-                                // abort_notify.notified() 分支,立即返回 abort Err。
-                                abort_notify.notify_waiters();
-                            }
-                        }
-                    }
+                    Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
             }

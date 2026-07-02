@@ -7,6 +7,8 @@
 //! - happy:流 3 个 chunk 后 EndTurn,client 应拼出完整 answer。
 //! - empty:不发任何 chunk 直接 EndTurn,client 必须 fail-loud。
 //! - long_stream:每秒发 1 个 chunk × 30 次,留窗口让 abort/timeout 测试触发。
+//! - fast_stream:每 10ms 发 1 个 chunk × 3000,无安静窗口,钉"高频输出下 abort
+//!   仍能及时响应"(codex review P2:abort 检查只在 recv 超时分支时会被输出压住)。
 //! - wrong_version:initialize 返回 ProtocolVersion::V0,client 必须 fail-loud。
 //! - fs_probe:server 主动 send_request(ReadTextFileRequest) 探 client 反向 capability;
 //!   MVP client 不声明 fs capability,SDK 应自动报错;mock 忽略错误继续发 chunk
@@ -120,6 +122,23 @@ async fn main() -> Result<()> {
                                     )),
                                 ));
                                 tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
+                            responder.respond(PromptResponse::new(StopReason::EndTurn))
+                        }
+                        "fast_stream" => {
+                            // 每 10ms 一个 chunk × 3000(约 30s):比 runner 主线程的
+                            // 100ms recv 轮询密得多,recv_timeout 永不超时 —— 专用于
+                            // 验证 abort 检查不依赖"输出安静"(codex review P2)。
+                            for i in 0..3000u32 {
+                                let _ = cx.send_notification(SessionNotification::new(
+                                    prompt.session_id.clone(),
+                                    SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                        ContentBlock::Text(TextContent::new(format!(
+                                            "fast-{i}"
+                                        ))),
+                                    )),
+                                ));
+                                tokio::time::sleep(Duration::from_millis(10)).await;
                             }
                             responder.respond(PromptResponse::new(StopReason::EndTurn))
                         }

@@ -73,6 +73,10 @@ pub enum StepKind {
     Loop {
         until: String,
         max: u32,
+        /// 可选 severity 阈值收敛:findings 全部 ≤ 此级别时视同收敛(residual 保留不修)。
+        /// 缺省 = 只认 verdict clean。取值 nit|minor|major;critical 被 validate 拒绝。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_residual: Option<crate::context::Severity>,
         body: Vec<Step>,
     },
     /// 通用 ACP (Agent Client Protocol) 步骤:把任何实现 ACP server 的外部 agent
@@ -263,7 +267,7 @@ impl Manifest {
                 base,
                 prompt,
             } => Self::validate_codex_fields(&step.id, "codex", action, path, base, prompt),
-            StepKind::Loop { body, until, .. } => {
+            StepKind::Loop { body, until, allow_residual, .. } => {
                 if until != "codex-clean" {
                     return Err(EngineError::Validation(format!(
                         "step '{}': Phase 1 仅支持 until: codex-clean",
@@ -278,6 +282,14 @@ impl Manifest {
                 {
                     return Err(EngineError::Validation(format!(
                         "step '{}': until codex-clean 的 loop body 必须含至少一个 codex step",
+                        step.id
+                    )));
+                }
+                // allow_residual: critical 无意义 —— 收敛即放行,而 critical 残留本就是
+                // "严重缺陷未修"，拒绝在 validate 阶段拦下配置错误。
+                if matches!(allow_residual, Some(crate::context::Severity::Critical)) {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': allow_residual 不能为 critical(残留 critical 无意义,收敛即放行严重缺陷)",
                         step.id
                     )));
                 }

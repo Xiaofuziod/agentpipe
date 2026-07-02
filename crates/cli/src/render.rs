@@ -12,7 +12,7 @@ pub fn render_plan_step(step: &Step) -> String {
         StepKind::Codex { action, .. } => format!("codex {action:?}"),
         StepKind::Human { .. } => "human".into(),
         StepKind::Acp { agent, .. } => format!("acp {agent}"),
-        StepKind::Loop { until, max, body } => {
+        StepKind::Loop { until, max, body, .. } => {
             format!("loop until={until} max={max} ({} steps)", body.len())
         }
     };

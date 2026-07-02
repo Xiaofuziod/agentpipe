@@ -21,7 +21,7 @@ fn parses_sample_manifest() {
     }
 
     match &m.steps[1].kind {
-        StepKind::Loop { until, max, body } => {
+        StepKind::Loop { until, max, body, .. } => {
             assert_eq!(until, "codex-clean");
             assert_eq!(*max, 3);
             assert_eq!(body.len(), 2);
@@ -236,4 +236,23 @@ fn validate_accepts_sample() {
         .unwrap()
         .validate()
         .expect("sample should be valid");
+}
+
+#[test]
+fn loop_allow_residual_parses_and_rejects_critical() {
+    let ok = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: l\n    kind: loop\n    until: codex-clean\n    max: 2\n    allow_residual: minor\n    body:\n      - id: r\n        kind: codex\n        action: review-mr\n        base: HEAD\n";
+    let m = Manifest::parse(ok).unwrap();
+    assert!(m.validate().is_ok());
+    let bad = ok.replace("allow_residual: minor", "allow_residual: critical");
+    let m = Manifest::parse(&bad).unwrap();
+    let err = m.validate().unwrap_err();
+    assert!(err.to_string().contains("allow_residual"), "err = {err}");
+}
+
+#[test]
+fn loop_allow_residual_absent_not_serialized() {
+    let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: l\n    kind: loop\n    until: codex-clean\n    max: 2\n    body:\n      - id: r\n        kind: codex\n        action: review-mr\n        base: HEAD\n";
+    let m = Manifest::parse(y).unwrap();
+    let out = serde_yml::to_string(&m).unwrap();
+    assert!(!out.contains("allow_residual"), "缺省不应序列化:\n{out}");
 }

@@ -1,4 +1,4 @@
-use crate::context::{RunContext, StepOutput, Verdict};
+use crate::context::{RunContext, Severity, StepOutput, Verdict};
 use crate::control::Control;
 use crate::manifest::{Manifest, OnUnmet, RunMode, Step, StepKind, Verifier, Verify};
 use crate::protocol::{Command, Event, GateKind, LoopEndReason, RunStatus, StepMetrics, StepStatus};
@@ -378,7 +378,9 @@ impl Executor {
                     }
                 }
             }
-            StepKind::Loop { until, max, body } => self.run_loop(&step.id, until, *max, body, gated),
+            StepKind::Loop { until, max, allow_residual, body } => {
+                self.run_loop(&step.id, until, *max, *allow_residual, body, gated)
+            }
         }
     }
 
@@ -556,7 +558,15 @@ impl Executor {
         }
     }
 
-    fn run_loop(&mut self, loop_id: &str, until: &str, max: u32, body: &[Step], gated: bool) -> Result<(), ()> {
+    fn run_loop(
+        &mut self,
+        loop_id: &str,
+        until: &str,
+        max: u32,
+        allow_residual: Option<Severity>,
+        body: &[Step],
+        gated: bool,
+    ) -> Result<(), ()> {
         // 锚点 = body 最后一个 codex step(until: codex-clean 的收敛信号源,validate 已保证存在)。
         // 锚点跑完立即判收敛(P6):收敛则跳过其后 body step,不再空烧一轮 fix。
         // 锚点之前的 codex step 不判 —— 那时锚点在 ctx 里的 verdict 是上一轮残留,读了是脏值。
@@ -587,7 +597,7 @@ impl Executor {
                         });
                         return Err(());
                     }
-                    if Some(i) == anchor && self.eval_until(until, body) {
+                    if Some(i) == anchor && self.eval_until(until, body, allow_residual) {
                         for skipped in &body[i + 1..] {
                             self.emit_skipped_with(&skipped.id, "loop 已收敛,跳过");
                         }
@@ -640,15 +650,23 @@ impl Executor {
             .unwrap_or(0)
     }
 
-    /// 目前只支持 codex-clean:找 body 里最后一个 codex step 的 verdict。
-    fn eval_until(&self, until: &str, body: &[Step]) -> bool {
+    /// 收敛判定。verdict clean 恒收敛;配置 allow_residual 时,findings 全部 ≤ 阈值
+    /// 也算收敛(带残留)。items 空 + 非 clean 是解析 fallback 的形状 —— fail-closed
+    /// 不收敛(放行等于把"无法解析 Codex 输出"判过)。
+    fn eval_until(&self, until: &str, body: &[Step], allow_residual: Option<Severity>) -> bool {
         if until != "codex-clean" {
             return false;
         }
         for sub in body.iter().rev() {
             if matches!(sub.kind, StepKind::Codex { .. }) {
                 if let Some(out) = self.ctx.get(&sub.id) {
-                    return matches!(out.verdict, Some(Verdict::Clean));
+                    if matches!(out.verdict, Some(Verdict::Clean)) {
+                        return true;
+                    }
+                    if let Some(t) = allow_residual {
+                        return !out.items.is_empty() && out.items.iter().all(|i| i.severity <= t);
+                    }
+                    return false;
                 }
             }
         }

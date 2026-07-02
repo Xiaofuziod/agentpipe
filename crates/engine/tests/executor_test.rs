@@ -1,7 +1,7 @@
 use agentpipe_engine::control::Control;
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
-use agentpipe_engine::protocol::{Command, Event, RunStatus, StepStatus};
+use agentpipe_engine::protocol::{Command, Event, LoopEndReason, RunStatus, StepStatus};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -703,7 +703,6 @@ fn loop_max_reached_carries_distinct_reason_for_each_termination_path() {
     // 失败路径(SubStepFailed)— 借用 base_ref_missing 已有的活锁防御场景:base 不
     // 存在 → review fail-loud → decision gate Abort → sub-step Err 透传 → loop
     // emit LoopMaxReached{reason: SubStepFailed, max: 1}。
-    use agentpipe_engine::protocol::LoopEndReason;
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _v = EnvGuard::set("STUB_VERDICT", "changes_requested");
     let yaml = r#"
@@ -966,4 +965,108 @@ steps:
     assert!(events.iter().any(|e| matches!(e,
         Event::StepFinished { step_id, status: StepStatus::Skipped, .. } if step_id == "fix")));
     assert!(events.iter().any(|e| matches!(e, Event::LoopConverged { iterations: 1, .. })));
+}
+
+/// P2:全 minor findings + allow_residual: minor → 带残留收敛,residual=1。
+#[test]
+fn loop_converges_with_residual_below_threshold() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let _s = EnvGuard::set("STUB_SEVERITY", "minor");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 3
+    allow_residual: minor
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: HEAD
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_c, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(events.iter().any(|e| matches!(e,
+        Event::LoopConverged { iterations: 1, residual: 1, .. })),
+        "minor ≤ minor 应第 1 轮带残留收敛: {events:?}");
+}
+
+/// P2:severity=high(未知串 → Critical)超过 minor 阈值 → 不收敛,耗尽 max 走门。
+#[test]
+fn loop_blocks_when_severity_above_threshold() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let _s = EnvGuard::set("STUB_SEVERITY", "high"); // 未知串,fail-closed → Critical
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 2
+    allow_residual: minor
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: HEAD
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(!events.iter().any(|e| matches!(e, Event::LoopConverged { .. })));
+    assert!(events.iter().any(|e| matches!(e,
+        Event::LoopMaxReached { reason: LoopEndReason::MaxReached, .. })));
+}
+
+/// P2 fail-closed:items 空 + changes_requested(= 解析 fallback 的形状)必须不收敛,
+/// 即便配了 allow_residual —— 放行等于把"无法解析 Codex 输出"判过。
+#[test]
+fn loop_never_converges_on_empty_items_with_changes_requested() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let _f = EnvGuard::set("STUB_FINDINGS", "[]");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 2
+    allow_residual: major
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: HEAD
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(!events.iter().any(|e| matches!(e, Event::LoopConverged { .. })),
+        "items 空 + 非 clean 绝不能收敛(fail-closed)");
 }

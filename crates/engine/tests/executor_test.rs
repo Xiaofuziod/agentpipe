@@ -26,7 +26,15 @@ fn loop_yaml(max: u32, allow_residual: Option<&str>, fix_prompt: Option<&str>) -
         .map(|s| format!("\n    allow_residual: {s}"))
         .unwrap_or_default();
     let fix = fix_prompt
-        .map(|p| format!("\n      - id: fix\n        kind: claude\n        prompt: \"{p}\""))
+        .map(|p| {
+            // 本 helper 不做 YAML 转义:含 `"` 会解析报错错位、含 `\` + 常见字母会被
+            // serde_yml 当转义静默替换(语义腰斩零报错,review finding #15)。fail-loud 拦下。
+            assert!(
+                !p.contains('"') && !p.contains('\\'),
+                "loop_yaml 不做 YAML 转义:fix_prompt 不能含 \" 或 \\(会静默腰斩或报错错位),请改用安全字符"
+            );
+            format!("\n      - id: fix\n        kind: claude\n        prompt: \"{p}\"")
+        })
         .unwrap_or_default();
     format!(
         "\nversion: 1\nname: t\ntarget: .\nmode: auto\nsteps:\n  - id: fixloop\n    kind: loop\n    until: codex-clean\n    max: {max}{residual}\n    body:\n      - id: rev\n        kind: codex\n        action: review-mr\n        base: HEAD{fix}\n"
@@ -942,4 +950,36 @@ fn fix_prompt_receives_history_on_second_round() {
     // 第 1 轮 history 空("STUB CLAUDE 收到: H:"),第 2 轮含第 1 轮 findings 头
     assert!(fix_lines.iter().any(|l| l.contains("第 1 轮")),
         "第 2 轮 fix prompt 必须展开 history,实际 progress 行: {fix_lines:?}");
+}
+
+/// review finding #1 回归:max=0 让 body 永不执行且决策门 Retry 原地打转(活锁),
+/// 必须在 validate 阶段拒绝。
+#[test]
+fn loop_max_zero_rejected_by_validate() {
+    let yaml = loop_yaml(0, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
+    let err = m.validate().unwrap_err();
+    assert!(err.to_string().contains("max"), "err = {err}");
+}
+
+/// review finding #2 回归:codex 输出 verdict=clean 但 findings 非空(schema 不约束
+/// 两字段联动),Clean 分支收敛的 residual 必须为 0 —— 非零会让 CLI/UI 的
+/// "residual allowed / 残留" 文案误导用户以为配置了 allow_residual。
+#[test]
+fn residual_zero_on_clean_verdict_even_with_findings() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "clean"); // stub 默认 findings 非空
+    let yaml = loop_yaml(3, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_c, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::LoopConverged { residual: 0, .. })),
+        "Clean 分支收敛 residual 必须为 0: {events:?}"
+    );
 }

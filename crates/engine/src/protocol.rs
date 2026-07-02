@@ -27,6 +27,23 @@ pub struct StepMetrics {
     pub cost_usd: f64,
 }
 
+impl StepMetrics {
+    /// 两份可选 metrics 求和;任一为 None 直接返另一个。executor 的 verify-retry
+    /// 累积与 codex vet 双调用共用(SSOT)—— 同一 step 内发生多次底层调用时必须
+    /// 求和而非覆盖,否则成本只上报最后一次,budget 系统性低估(review §A finding #4
+    /// 修过 claude 路径的同源问题,vet 路径对齐同一模式,review finding #7)。
+    pub fn sum(a: Option<StepMetrics>, b: Option<StepMetrics>) -> Option<StepMetrics> {
+        match (a, b) {
+            (None, x) | (x, None) => x,
+            (Some(a), Some(b)) => Some(StepMetrics {
+                num_turns: a.num_turns + b.num_turns,
+                duration_ms: a.duration_ms + b.duration_ms,
+                cost_usd: a.cost_usd + b.cost_usd,
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Event {
@@ -149,6 +166,11 @@ pub struct ReviewResult {
     pub findings: String,
     /// 结构化 findings(severity 收敛判定用)。见 FindingItem。
     pub items: Vec<FindingItem>,
+    /// 本结果是否来自"输出不可解析"的兜底(而非成功解析)。合法输出
+    /// `{verdict: changes_requested, findings: []}` 与解析 fallback 的 verdict/items
+    /// 形状完全相同,收敛判定对两者同样保守,但根因不同 —— 该标志让 runner 能对
+    /// "模型自相矛盾输出"单独发提示(review finding #10)。
+    pub parse_failed: bool,
     /// codex 本次 review 的成本/轮次/耗时。codex CLI 当前不输出 token usage,所以
     /// 实际填 None;字段先就位让 verify_once 把 verifier cost 上报给 budget,等
     /// codex CLI 升级输出 metrics 后直接填,无需再改 schema。

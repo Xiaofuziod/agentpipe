@@ -10,6 +10,17 @@ fn stub() -> CodexRunner {
     CodexRunner::new(fixture("stub-codex.sh"))
 }
 
+/// vet 测试的调用计数文件(review finding #14):stub 的计数是无锁 read-modify-write,
+/// 并发安全完全靠两条纪律 —— ① tag 每个测试唯一(文件名互异 = 不共享文件)
+/// ② 调用方必须持 ENV_LOCK(STUB_COUNT_FILE 本身是进程级 env)。新增 vet 测试
+/// 一律经本 helper 建计数文件,别绕开自己拼路径。
+fn vet_count_file(tag: &str) -> (PathBuf, EnvGuard) {
+    let path = std::env::temp_dir().join(format!("ap-vet-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let guard = EnvGuard::set("STUB_COUNT_FILE", path.to_str().unwrap());
+    (path, guard)
+}
+
 #[test]
 fn parses_changes_requested() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -349,9 +360,7 @@ echo "done"
 fn vet_replaces_result_when_all_refuted() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
-    let count = std::env::temp_dir().join(format!("ap-vet-count-{}", std::process::id()));
-    let _ = std::fs::remove_file(&count);
-    let _c = EnvGuard::set("STUB_COUNT_FILE", count.to_str().unwrap());
+    let (count, _c) = vet_count_file("count");
     let runner = CodexRunner::new(fixture("stub-codex.sh"));
     let r = runner.review(&CodexAction::ReviewMr, None, Some("HEAD"), None, true,
                           None, &mut |_l, _r| {}, Path::new(".")).unwrap();
@@ -365,9 +374,7 @@ fn vet_failure_keeps_first_result() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
     let _f = EnvGuard::set("STUB_FAIL_ON_CALL_2", "1");
-    let count = std::env::temp_dir().join(format!("ap-vet-fail-{}", std::process::id()));
-    let _ = std::fs::remove_file(&count);
-    let _c = EnvGuard::set("STUB_COUNT_FILE", count.to_str().unwrap());
+    let (_count, _c) = vet_count_file("fail");
     let runner = CodexRunner::new(fixture("stub-codex.sh"));
     let r = runner.review(&CodexAction::ReviewMr, None, Some("HEAD"), None, true,
                           None, &mut |_l, _r| {}, Path::new(".")).unwrap();
@@ -380,9 +387,7 @@ fn vet_failure_keeps_first_result() {
 fn vet_not_triggered_on_clean() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "clean");
-    let count = std::env::temp_dir().join(format!("ap-vet-clean-{}", std::process::id()));
-    let _ = std::fs::remove_file(&count);
-    let _c = EnvGuard::set("STUB_COUNT_FILE", count.to_str().unwrap());
+    let (count, _c) = vet_count_file("clean");
     let runner = CodexRunner::new(fixture("stub-codex.sh"));
     let _ = runner.review(&CodexAction::ReviewMr, None, Some("HEAD"), None, true,
                           None, &mut |_l, _r| {}, Path::new(".")).unwrap();

@@ -253,7 +253,7 @@ impl Executor {
                     // 先 sum 出 cumulative 再 check_budget:budget 触发的 StepFailed 携带
                     // 该 step 至今的全部花费,audit 不漏统计(review §A finding #4)。
                     self.charge(&metrics);
-                    step_metrics = Self::sum_metrics(step_metrics, metrics);
+                    step_metrics = StepMetrics::sum(step_metrics,metrics);
                     self.check_budget(&step.id, &step_metrics)?;
                     self.ctx.record(&step.id, StepOutput {
                         artifact: Some(answer.clone()),
@@ -278,7 +278,7 @@ impl Executor {
                     // 同样 charge → sum → check 顺序,确保 budget StepFailed 拿到包含
                     // verifier 这一笔的 cumulative。
                     self.charge(&verifier_metrics);
-                    step_metrics = Self::sum_metrics(step_metrics, verifier_metrics);
+                    step_metrics = StepMetrics::sum(step_metrics,verifier_metrics);
                     self.check_budget(&step.id, &step_metrics)?;
                     // 暴露 verifier findings 供下游 {{<id>.findings}} 引用
                     self.ctx.record(&step.id, StepOutput {
@@ -601,16 +601,20 @@ impl Executor {
                         });
                         return Err(());
                     }
-                    if Some(i) == anchor && self.eval_until(until, body, anchor, allow_residual) {
-                        for skipped in &body[i + 1..] {
-                            self.emit_skipped_with(&skipped.id, "loop 已收敛,跳过");
+                    if Some(i) == anchor {
+                        let anchor_out = self.anchor_output(body, anchor);
+                        if Self::eval_until(until, anchor_out, allow_residual) {
+                            let residual = Self::residual_of(anchor_out);
+                            for skipped in &body[i + 1..] {
+                                self.emit_skipped_with(&skipped.id, "loop 已收敛,跳过");
+                            }
+                            let _ = self.events.send(Event::LoopConverged {
+                                loop_id: loop_id.into(),
+                                iterations: n,
+                                residual,
+                            });
+                            return Ok(());
                         }
-                        let _ = self.events.send(Event::LoopConverged {
-                            loop_id: loop_id.into(),
-                            iterations: n,
-                            residual: self.residual_count(body, anchor),
-                        });
-                        return Ok(());
                     }
                 }
             }
@@ -621,8 +625,8 @@ impl Executor {
                 max: base + max,
                 reason: LoopEndReason::MaxReached,
             });
-            let findings = anchor
-                .and_then(|i| self.ctx.get(&body[i].id))
+            let findings = self
+                .anchor_output(body, anchor)
                 .and_then(|o| o.findings.clone())
                 .unwrap_or_default();
             let suggestion = format!(
@@ -643,27 +647,35 @@ impl Executor {
         }
     }
 
-    /// 锚点 step 当前 items 数(LoopConverged.residual)。verdict-clean 收敛通常 0;
-    /// allow_residual 收敛(Task 3)时为遗留 finding 数。`anchor` 由 run_loop 顶部算好
-    /// 传入(收尾自查收口:此前这里自己重新 rfind 一遍,与 run_loop / eval_until 各算
-    /// 一次「body 最后一个 codex step」,三处同一份逻辑分散易漂移)。
-    fn residual_count(&self, body: &[Step], anchor: Option<usize>) -> u32 {
-        anchor
-            .and_then(|i| self.ctx.get(&body[i].id))
-            .map(|o| o.items.len() as u32)
-            .unwrap_or(0)
+    /// 锚点 step 在 ctx 里的当前输出。「按 anchor 查 ctx」全 run_loop 唯一入口
+    /// (review finding #12:此前收敛判定 / residual 计数 / 门 findings 三处各写一份
+    /// 同款 and_then,改 anchor 语义时漏改一处即产生自相矛盾的 LoopConverged)。
+    fn anchor_output<'a>(&'a self, body: &[Step], anchor: Option<usize>) -> Option<&'a StepOutput> {
+        anchor.and_then(|i| self.ctx.get(&body[i].id))
     }
 
-    /// 收敛判定。verdict clean 恒收敛;配置 allow_residual 时,findings 全部 ≤ 阈值
-    /// 也算收敛(带残留)。items 空 + 非 clean 是解析 fallback 的形状 —— fail-closed
-    /// 不收敛(放行等于把"无法解析 Codex 输出"判过)。`anchor` 同 residual_count,由
-    /// run_loop 传入,不在此重复定位。
-    fn eval_until(&self, until: &str, body: &[Step], anchor: Option<usize>, allow_residual: Option<Severity>) -> bool {
+    /// LoopConverged.residual:**仅** allow_residual 阈值收敛时报告遗留 finding 数;
+    /// verdict-clean 收敛一律 0。codex 可能在 clean 判定下仍附带非空 findings(schema
+    /// 不约束两字段联动),那不是"配置放行的残留" —— 报非零会让 CLI/UI 的 "residual
+    /// allowed / 残留" 文案误导用户以为配置了 allow_residual(review finding #2)。
+    fn residual_of(anchor_out: Option<&StepOutput>) -> u32 {
+        match anchor_out {
+            Some(out) if !matches!(out.verdict, Some(Verdict::Clean)) => out.items.len() as u32,
+            _ => 0,
+        }
+    }
+
+    /// 收敛判定(无 self,输入即锚点输出)。verdict clean 恒收敛;配置 allow_residual
+    /// 时,findings 全部 ≤ 阈值也算收敛(带残留)。items 空 + 非 clean 不收敛:可能是
+    /// 解析 fallback,也可能是模型给出 changes_requested 却无条目的自相矛盾输出
+    /// (review finding #10:两种形状内部靠 parse_failed 区分,codex runner 侧对后者
+    /// 另发 progress 提示),两者都不该放行 —— fail-closed。
+    fn eval_until(until: &str, anchor_out: Option<&StepOutput>, allow_residual: Option<Severity>) -> bool {
         if until != "codex-clean" {
             return false;
         }
-        let Some(out) = anchor.and_then(|i| self.ctx.get(&body[i].id)) else {
-            return false; // 没找到 codex step,或该 step 尚未跑过 → fail-closed 不收敛
+        let Some(out) = anchor_out else {
+            return false; // 锚点尚无输出(从未成功跑过)→ fail-closed 不收敛
         };
         if matches!(out.verdict, Some(Verdict::Clean)) {
             return true;
@@ -719,21 +731,7 @@ impl Executor {
         });
     }
 
-    /// 累加两份 metrics 的 num_turns / duration_ms / cost_usd;任一为 None 直接返另一个。
-    /// 用于 Claude verify-retry 路径:把所有 attempt + verifier 的 metrics 在 step 内
-    /// 累积,让 StepFinished 携带的 metrics 反映该 step 的**全部**花费(review-2 §B 修
-    /// audit/UI cost 漏统计:之前 finish 只传末次 attempt 一份,verifier 与早期 attempt
-    /// 全部不进 emit,与 ctx.cost_so_far_usd 的实际累计不一致)。
-    fn sum_metrics(a: Option<StepMetrics>, b: Option<StepMetrics>) -> Option<StepMetrics> {
-        match (a, b) {
-            (None, x) | (x, None) => x,
-            (Some(a), Some(b)) => Some(StepMetrics {
-                num_turns: a.num_turns + b.num_turns,
-                duration_ms: a.duration_ms + b.duration_ms,
-                cost_usd: a.cost_usd + b.cost_usd,
-            }),
-        }
-    }
+    // metrics 求和已收口到 StepMetrics::sum(协议层 SSOT,verify-retry 与 codex vet 共用)。
 
     /// 累加一次 spawn 的成本(单次 delta),不判 budget。专门做 cost 累加这一件事,
     /// 与 check_budget 拆开 — review §A finding #4 后:budget 触发的 StepFailed 必须

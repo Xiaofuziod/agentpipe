@@ -116,7 +116,13 @@ function Fields({
             <select
               className="select"
               value={step.action}
-              onChange={(e) => onChange({ ...step, action: e.target.value as CodexAction })}
+              onChange={(e) => {
+                const action = e.target.value as CodexAction;
+                // vet 仅 review-mr/review-doc 支持,ask 配 vet 会被 validate 拒绝;
+                // GUI 无 vet 勾选框可关,切到 ask 时必须显式剥离,否则隐形携带的
+                // vet:true 会在保存/运行时才报错且无处修(F6)。
+                onChange({ ...step, action, vet: action === "ask" ? undefined : step.vet });
+              }}
             >
               <option value="review-mr">review-mr</option>
               <option value="review-doc">review-doc</option>

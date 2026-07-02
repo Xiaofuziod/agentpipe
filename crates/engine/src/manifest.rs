@@ -276,10 +276,19 @@ impl Manifest {
                 }
                 Ok(())
             }
-            StepKind::Loop { body, until, allow_residual, .. } => {
+            StepKind::Loop { body, until, allow_residual, max, .. } => {
                 if until != "codex-clean" {
                     return Err(EngineError::Validation(format!(
                         "step '{}': Phase 1 仅支持 until: codex-clean",
+                        step.id
+                    )));
+                }
+                // max=0 时 run_loop 的 for (base+1)..=(base+max) 恒为空区间:body 一次
+                // 不跑直接弹决策门,且 Retry 的 base += 0 永不推进 —— 对"见门即批"的
+                // 自动化/GUI 用户是活锁(review finding #1,已运行时实测)。配置期拦下。
+                if *max == 0 {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': loop.max 必须 ≥ 1(0 会让 body 永不执行且重试原地打转)",
                         step.id
                     )));
                 }

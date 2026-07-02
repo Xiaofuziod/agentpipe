@@ -148,15 +148,15 @@ converged =
 
 | 文件 | 改动 |
 |---|---|
-| `crates/engine/src/executor.rs` | run_loop:MaxReached 决策门 + Retry offset;锚点短路;eval_until 加 allow_residual 判定;codex 分支写 history |
-| `crates/engine/src/manifest.rs` | Loop.allow_residual(validate 取值域)+ Codex.vet(validate 拒 ask+vet) |
-| `crates/engine/src/context.rs` | StepOutput.items;RunContext.histories + interpolate 支持 `history` 字段;Severity 枚举与排序 |
-| `crates/engine/src/protocol.rs` | ReviewResult.items;LoopConverged.residual(serde default) |
-| `crates/engine/src/runner/codex.rs` | REVIEW_SCHEMA severity enum;raw_to_result 产 items;vet 二次调用 |
-| `crates/cli/src/render.rs` | LoopConverged residual 渲染 |
-| `ui/src`(Tauri GUI) | LoopConverged residual 展示;loop 决策门确认走现有 Decision gate 渲染(预期零改动,验证项);**验证 Skipped-without-Started 渲染**:P1 Skip(loop_id)与 P6 短路跳过的 body step 都会产生无 StepStarted 的 StepFinished{Skipped},GUI 按 step_id 渲染必须容忍(不出幽灵/崩溃) |
-| `templates/*.yaml` | fix prompt 加 history 段;README 行为描述核对(P1 修后 README 声明成真,无需改) |
-| `crates/engine/tests/*` | 每个 P 至少 2 个测试,见 §7 |
+| crates/engine/src/executor.rs | run_loop:MaxReached 决策门 + Retry offset;锚点短路;eval_until 加 allow_residual 判定;codex 分支写 history |
+| crates/engine/src/manifest.rs | Loop.allow_residual(validate 取值域)+ Codex.vet(validate 拒 ask+vet) |
+| crates/engine/src/context.rs | StepOutput.items;RunContext.histories + interpolate 支持 history 字段;Severity 枚举与排序 |
+| crates/engine/src/protocol.rs | ReviewResult.items;LoopConverged.residual(serde default) |
+| crates/engine/src/runner/codex.rs | REVIEW_SCHEMA severity enum;raw_to_result 产 items;vet 二次调用 |
+| crates/cli/src/render.rs | LoopConverged residual 渲染 |
+| ui/src(Tauri GUI) | LoopConverged residual 展示;loop 决策门确认走现有 Decision gate 渲染(预期零改动,验证项);验证 Skipped-without-Started 渲染:P1 Skip(loop_id)与 P6 短路跳过的 body step 都会产生无 StepStarted 的 StepFinished(Skipped),GUI 按 step_id 渲染必须容忍(不出幽灵/崩溃) |
+| templates/*.yaml | fix prompt 加 history 段;README 行为描述核对(P1 修后 README 声明成真,无需改) |
+| crates/engine/tests/* | 每个 P 至少 2 个测试,见 §7 |
 
 ## 6. 风险
 

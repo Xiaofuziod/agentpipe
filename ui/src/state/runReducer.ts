@@ -92,23 +92,42 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
         }),
         activeGate: null,
       };
-    case "StepAwaitingGate":
-      return {
-        ...prev,
-        ...setStep(prev, e.step_id, { status: "AwaitingGate" }),
-        activeGate: {
-          step_id: e.step_id,
-          suggestion: e.suggestion,
-          expects_artifact: e.expects_artifact,
-          gate_kind: e.gate_kind,
-        },
+    case "StepAwaitingGate": {
+      const gate = {
+        step_id: e.step_id,
+        suggestion: e.suggestion,
+        expects_artifact: e.expects_artifact,
+        gate_kind: e.gate_kind,
       };
-    case "StepFinished":
+      // loop 跑满 max 轮的决策门(重试/跳过/中止)以 loop_id 当 step_id 复用同一通道
+      // (executor.rs decision_gate)。它不是真正的 step,写进 steps/order 会与下面
+      // loops 区块各自独立渲染同一个 id,产生 F3 的双渲染:Retry 后引擎不发对应的
+      // StepStarted,幽灵行永卡 AwaitingGate。改成只更新 loops[id] 的文案。
+      if (e.step_id in prev.loops) {
+        const loopEntry = prev.loops[e.step_id] ?? { iteration: 0 };
+        return {
+          ...prev,
+          loops: { ...prev.loops, [e.step_id]: { ...loopEntry, result: "等待决策(重试/跳过/中止)" } },
+          activeGate: gate,
+        };
+      }
+      return { ...prev, ...setStep(prev, e.step_id, { status: "AwaitingGate" }), activeGate: gate };
+    }
+    case "StepFinished": {
+      // 同上:用户在决策门选「跳过」时引擎发 StepFinished{Skipped, step_id: loop_id}
+      // (executor.rs emit_skipped)。同样只落 loops 文案,不产生扁平 step 行,否则
+      // 扁平流的「skipped」会与 loops 区沿用的「到上限未干净」旧文案矛盾并存。
+      if (e.step_id in prev.loops) {
+        const loopEntry = prev.loops[e.step_id] ?? { iteration: 0 };
+        const result = e.status === "Skipped" ? "已跳过(未收敛)" : e.summary;
+        return { ...prev, loops: { ...prev.loops, [e.step_id]: { ...loopEntry, result } }, activeGate: null };
+      }
       return {
         ...prev,
         ...setStep(prev, e.step_id, { status: e.status, summary: e.summary, metrics: e.metrics ?? undefined }),
         activeGate: null,
       };
+    }
     case "StepFailed":
       return { ...prev, ...setStep(prev, e.step_id, { status: "Failed", error: e.error }) };
     case "WorktreeReady":

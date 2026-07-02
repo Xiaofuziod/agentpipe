@@ -3,7 +3,7 @@ use crate::control::Control;
 use crate::context::{Severity, Verdict};
 use crate::error::EngineError;
 use crate::manifest::CodexAction;
-use crate::protocol::{FindingItem, ReviewResult};
+use crate::protocol::{FindingItem, ReviewResult, StepMetrics};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -105,7 +105,10 @@ impl CodexRunner {
         // 注:实测 codex v0.139.0 把最终结构化结果打到 stdout、并不写 -o(--output-last-message)
         // 文件,故下方以 stdout 为主、-o 为 fallback(`codex exec review` 子命令的 -o 写散文,弃用)。
         // review-doc 把文档内容经 stdin 喂给 codex(spec 7.2);其余 action 无 stdin。
-        let (args, stdin): (Vec<String>, Option<String>) = match action {
+        // vet 开启时同步构造 VetScope:核验是全新 codex exec 进程,主审查的范围
+        // (base 分支 / 文档内容)必须重申,否则核验无从判断 finding 是否属于本次
+        // 审查对象(review finding #5)。
+        let (args, stdin, vet_scope): (Vec<String>, Option<String>, Option<VetScope>) = match action {
             CodexAction::ReviewMr => {
                 // base 必须由 caller 提供(写死或模板用 {{...}} 动态解析,见 templates/);
                 // 不再有 fallback "dev" — 写死 "dev" 是「review-mr 默认审 dev」的隐式假设,
@@ -136,39 +139,43 @@ impl CodexRunner {
                          且目标仓库已 fetch 到该分支。"
                     )));
                 }
+                let scope = vet.then(|| VetScope {
+                    scope: format!(
+                        "核验对象:当前工作区相对 `{b}` 分支的代码改动(git diff {b}...HEAD 以及未提交改动)。只核实属于该改动范围的 findings;范围之外的既有问题不属于本次审查,一律驳回。"
+                    ),
+                    stdin: None,
+                });
                 (
-                    vec![
-                        "exec".into(),
-                        "-s".into(),
-                        "read-only".into(),
-                        "--output-schema".into(),
+                    schema_exec_args(
                         schema.clone(),
-                        "-o".into(),
                         out_str.clone(),
                         format!(
                             "审查当前工作区相对 `{b}` 分支的代码改动(查看 git diff {b}...HEAD 以及未提交改动),按 schema 输出 verdict(clean 或 changes_requested)和 findings{SUGGESTION_HINT}"
                         ),
-                    ],
+                    ),
                     None,
+                    scope,
                 )
             }
             CodexAction::ReviewDoc => {
                 let rel = doc_path.unwrap_or("");
                 let content = std::fs::read_to_string(cwd.join(rel)).unwrap_or_default();
+                let scope = vet.then(|| VetScope {
+                    scope: format!(
+                        "核验对象:随附设计文档 {rel}(文档内容已经由 stdin 附上,请基于文档内容核实,不要仅凭 findings 文本臆断)。"
+                    ),
+                    stdin: Some(content.clone()),
+                });
                 (
-                    vec![
-                        "exec".into(),
-                        "-s".into(),
-                        "read-only".into(),
-                        "--output-schema".into(),
+                    schema_exec_args(
                         schema.clone(),
-                        "-o".into(),
                         out_str.clone(),
                         format!(
                             "审查随附设计文档 {rel} 并按 schema 输出 verdict/findings{SUGGESTION_HINT}"
                         ),
-                    ],
+                    ),
                     Some(content),
+                    scope,
                 )
             }
             CodexAction::Ask => (
@@ -181,6 +188,7 @@ impl CodexRunner {
                     ask_prompt.unwrap_or("").into(),
                 ],
                 None,
+                None,
             ),
         };
 
@@ -192,14 +200,36 @@ impl CodexRunner {
         // (stub / 旧 codex 路径,parse_review 自带"无法解析"兜底)。
         let mut result = parse_review_stdout(&stdout).unwrap_or_else(|| parse_review(&out_file));
 
+        // 合法解析出 changes_requested 却零条目:模型自相矛盾的输出(schema 不禁止),
+        // 与解析失败在收敛判定上同样保守,但根因不同 —— 显式提示避免用户把它误判成
+        // "输出坏了"或反之(review finding #10)。
+        if !result.parse_failed
+            && matches!(result.verdict, Verdict::ChangesRequested)
+            && result.items.is_empty()
+        {
+            on_progress(
+                "⚠ codex 判定 changes_requested 但未给出任何 finding 条目(模型输出自相矛盾),收敛判定按保守处理",
+                None,
+            );
+        }
+
         // P3(spec §3.3):自反驳核验。仅非 clean 且有结构化 items 时触发(fallback 路径
         // items 空,无从核起,保留原样);核验失败保留首轮 —— fail-closed 方向是"不丢
         // review 信号,宁可多修不可漏修"。
-        if vet && matches!(result.verdict, Verdict::ChangesRequested) && !result.items.is_empty() {
-            on_progress("核验 findings(自反驳)…", None);
-            match self.vet_pass(&result, control, on_progress, cwd) {
-                Ok(vetted) => result = vetted,
-                Err(e) => on_progress(&format!("核验失败,保留原 findings: {e}"), None),
+        if matches!(result.verdict, Verdict::ChangesRequested) && !result.items.is_empty() {
+            if let Some(scope) = &vet_scope {
+                on_progress("核验 findings(自反驳)…", None);
+                match self.vet_pass(&result, scope, control, on_progress, cwd) {
+                    Ok(mut vetted) => {
+                        // vet 是第二次真实 codex 调用:metrics 与首轮求和而非覆盖 ——
+                        // codex CLI 未来输出 usage 后,覆盖会让 vet step 两次计费只报
+                        // 一次,budget 系统性低估(review finding #7,对齐 executor 的
+                        // verify-retry sum 模式)。
+                        vetted.metrics = StepMetrics::sum(result.metrics.take(), vetted.metrics);
+                        result = vetted;
+                    }
+                    Err(e) => on_progress(&format!("核验失败,保留原 findings: {e}"), None),
+                }
             }
         }
 
@@ -214,9 +244,12 @@ impl CodexRunner {
     /// 二次 read-only codex 调用:逐条复核首轮 findings。输出不可解析 → Err
     /// (caller 保留首轮,不同于 review 主路径的 fallback-ChangesRequested 语义:
     /// vet 的 fallback 若替换首轮,等于用"无法解析"占位符抹掉真实 findings)。
+    /// `scope` 重申主审查边界(review finding #5):核验是全新进程,不告诉它 base
+    /// 分支 / 文档内容,它无从区分"本次改动的问题"与"范围外既有问题"。
     fn vet_pass(
         &self,
         first: &ReviewResult,
+        scope: &VetScope,
         control: Option<&Control>,
         on_progress: &mut dyn FnMut(&str, Option<u32>),
         cwd: &Path,
@@ -224,18 +257,14 @@ impl CodexRunner {
         let (out_file, out_str) = out_file_for("codex-vet");
         let schema = write_schema()?;
         let prompt = format!(
-            "以下是你刚对当前工作区给出的 code review findings。逐条重新到代码里核实:\
-             尝试用具体代码证据反驳每一条;删除证据不足、误读或幻觉的条目,保留确认成立的。\
-             驳回必须给出代码证据,不确定时保留。按 schema 重新输出最终 verdict 和 findings{SUGGESTION_HINT}\n\n{}",
-            first.findings
+            "{}\n以下是刚对上述核验对象给出的 code review findings。逐条重新核实:\
+             尝试用具体代码/文档证据反驳每一条;删除证据不足、误读、幻觉或超出核验对象范围的条目,\
+             保留确认成立的。驳回必须给出证据,不确定时保留。按 schema 重新输出最终 verdict 和 findings{SUGGESTION_HINT}\n\n{}",
+            scope.scope, first.findings
         );
-        let args: Vec<String> = vec![
-            "exec".into(), "-s".into(), "read-only".into(),
-            "--output-schema".into(), schema,
-            "-o".into(), out_str,
-            prompt,
-        ];
-        let (stdout, success) = self.run_codex(&args, None, "核验", control, on_progress, cwd)?;
+        let args = schema_exec_args(schema, out_str, prompt);
+        let (stdout, success) =
+            self.run_codex(&args, scope.stdin.as_deref(), "核验", control, on_progress, cwd)?;
         // vet 与 review 主路径的失败语义有意不同:核验的任何失败(非零退出 / 不可解析)
         // 都必须是可判别的 Err,让 caller 保留首轮结果;绝不能走"无法解析"占位符 fallback
         // 抹掉真实 findings。
@@ -284,6 +313,30 @@ impl CodexRunner {
     }
 }
 
+/// vet 二次核验的审查边界:主审查的 scope(base 分支 / 文档内容)重申给核验进程。
+/// vet 是全新 codex exec,不重申它无从知道哪些 finding 属于本次审查范围
+/// (review finding #5);review-doc 还需把文档内容重新经 stdin 附上。
+struct VetScope {
+    scope: String,
+    stdin: Option<String>,
+}
+
+/// codex exec 结构化审查调用的公共参数前缀(read-only 沙箱 + strict schema + -o 输出)。
+/// ReviewMr / ReviewDoc / vet_pass 三处共用 —— 此前三份手写 vec! 逐字重复,升级 CLI
+/// 加公共 flag 时最易漏改不在原两处旁边的 vet(review finding #11)。Ask 无 schema 不适用。
+fn schema_exec_args(schema: String, out_str: String, prompt: String) -> Vec<String> {
+    vec![
+        "exec".into(),
+        "-s".into(),
+        "read-only".into(),
+        "--output-schema".into(),
+        schema,
+        "-o".into(),
+        out_str,
+        prompt,
+    ]
+}
+
 /// 结构化输出临时文件路径:进程 + 递增序号命名,并发调用互不撞名。
 /// 返回 (PathBuf, 字符串形式) 供 `-o` 参数与后续读取共用。
 fn out_file_for(tag: &str) -> (PathBuf, String) {
@@ -310,10 +363,10 @@ fn emit_findings_summary(result: &ReviewResult, on_line: &mut dyn FnMut(&str)) {
         on_line(&format!("─── {verdict_tag} ───"));
         return;
     }
-    let count = findings_trim
-        .lines()
-        .filter(|l| l.starts_with('['))
-        .count();
+    // 条数直接取结构化 items(单一来源,executor 的 residual 同源)。此前用行首 '['
+    // 的文本启发式,summary 内嵌换行且续行以 '[' 开头(如 markdown checkbox)时会
+    // 多算(review finding #8);fallback 路径 items 空 + 占位文案,两种算法同为 0。
+    let count = result.items.len();
     let header = if count > 0 {
         format!("─── {verdict_tag} · {count} 条 finding ───")
     } else {
@@ -420,7 +473,7 @@ fn raw_to_result(raw: RawReview) -> ReviewResult {
         .map(render_finding)
         .collect::<Vec<_>>()
         .join("\n");
-    ReviewResult { verdict, findings, items, metrics: None }
+    ReviewResult { verdict, findings, items, parse_failed: false, metrics: None }
 }
 
 /// 从 codex stdout 抓最后一条能解析成 schema 的 JSON 行。无则 None(交给 -o fallback)。
@@ -442,7 +495,12 @@ static SCHEMA_PATH: OnceLock<String> = OnceLock::new();
 
 fn write_schema() -> Result<String, EngineError> {
     if let Some(p) = SCHEMA_PATH.get() {
-        return Ok(p.clone());
+        // 命中缓存仍复核文件在盘:长驻进程(Tauri 多 run)期间 /tmp 可能被系统清理器
+        // 清掉,盲信缓存会让后续所有 review/vet 拿死路径失败且无自愈,报错还被解析
+        // fallback 掩盖成"无法解析"(review finding #4)。缺失则落回重写分支自愈。
+        if Path::new(p).exists() {
+            return Ok(p.clone());
+        }
     }
     // 只缓存成功路径:失败不缓存,瞬时磁盘错误不会毒化长驻进程(Tauri GUI 同进程
     // 跑多个 run)的后续调用。写入走「唯一临时名 + 原子 rename」:同进程多线程并发
@@ -472,6 +530,7 @@ fn parse_review(out_file: &Path) -> ReviewResult {
         verdict: Verdict::ChangesRequested,
         findings: "(无法解析 Codex 输出,按需修改处理)".into(),
         items: vec![],
+        parse_failed: true,
         metrics: None,
     })
 }

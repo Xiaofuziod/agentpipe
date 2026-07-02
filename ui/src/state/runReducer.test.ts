@@ -225,6 +225,33 @@ describe("runReducer", () => {
     expect(s.loops["l"].result).toBe("收敛");
   });
 
+  it("loop 决策门(AwaitingGate/Skipped 复用 loop_id)只更新 loops,不进入扁平 step 流(F3)", () => {
+    let s = initialRunState();
+    // 对照 executor.rs run_loop:跑满 max 轮 → LoopMaxReached → decision_gate 发
+    // StepAwaitingGate{step_id: loop_id},此时 loops[loop_id] 必已存在。
+    s = runReducer(s, { type: "LoopIteration", loop_id: "codex-loop", iteration: 1 });
+    s = runReducer(s, { type: "LoopMaxReached", loop_id: "codex-loop", max: 1, reason: "max_reached" });
+    s = runReducer(s, {
+      type: "StepAwaitingGate",
+      step_id: "codex-loop",
+      suggestion: "loop 跑满 1 轮仍未收敛,选择 重试/跳过/中止",
+      expects_artifact: false,
+      gate_kind: "decision",
+    });
+    // 门照常弹(GatePrompt 靠 activeGate),但不应该在扁平 step 流里长出幽灵行
+    expect(s.activeGate?.step_id).toBe("codex-loop");
+    expect(s.steps["codex-loop"]).toBeUndefined();
+    expect(s.order).not.toContain("codex-loop");
+    expect(s.loops["codex-loop"].result).toBeTruthy();
+
+    // 用户选「跳过」→ 引擎发 StepFinished{Skipped, step_id: loop_id}(emit_skipped)
+    s = runReducer(s, { type: "StepFinished", step_id: "codex-loop", status: "Skipped", summary: "skipped" });
+    expect(s.activeGate).toBeNull();
+    expect(s.steps["codex-loop"]).toBeUndefined();
+    expect(s.order).not.toContain("codex-loop");
+    expect(s.loops["codex-loop"].result).toContain("跳过");
+  });
+
   it("无 StepStarted 的 StepFinished(Skipped) upsert 出可见条目", () => {
     // P1 Skip(loop_id)与 P6 短路跳过都会产生 Finished-without-Started;
     // setStep 是 upsert(runReducer.ts:57-63,`?? { status: "Pending" }` + order 补插),

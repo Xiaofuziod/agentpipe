@@ -1,7 +1,9 @@
 use agentpipe_engine::manifest::{Step, StepKind};
 use agentpipe_engine::protocol::{Event, LoopEndReason, StepStatus};
 
-/// dry-run:把一个 step 渲染成一行计划。纯函数。
+/// dry-run:把一个 step 渲染成计划行;loop 递归展开 body(缩进两格)。纯函数。
+/// vet / allow_residual 必须可见(review finding #9):前者意味着每个非 clean review
+/// 轮多一次 codex 调用的钱,后者放宽收敛严格度,dry-run 正是给用户执行前核对这些的。
 pub fn render_plan_step(step: &Step) -> String {
     let detail = match &step.kind {
         StepKind::Claude { verify, skill, .. } => {
@@ -9,14 +11,36 @@ pub fn render_plan_step(step: &Step) -> String {
             let v = verify.as_ref().map(|_| " +verify").unwrap_or_default();
             format!("claude{s}{v}")
         }
-        StepKind::Codex { action, .. } => format!("codex {action:?}"),
+        StepKind::Codex { action, vet, .. } => {
+            let v = if *vet { " +vet" } else { "" };
+            format!("codex {action:?}{v}")
+        }
         StepKind::Human { .. } => "human".into(),
         StepKind::Acp { agent, .. } => format!("acp {agent}"),
-        StepKind::Loop { until, max, body, .. } => {
-            format!("loop until={until} max={max} ({} steps)", body.len())
+        StepKind::Loop { until, max, allow_residual, body } => {
+            let ar = allow_residual
+                .as_ref()
+                .map(|s| format!(" allow_residual={}", format!("{s:?}").to_lowercase()))
+                .unwrap_or_default();
+            format!("loop until={until} max={max}{ar} ({} steps)", body.len())
         }
     };
-    format!("  - {} [{detail}]", step.id)
+    let line = format!("  - {} [{detail}]", step.id);
+    if let StepKind::Loop { body, .. } = &step.kind {
+        let inner = body
+            .iter()
+            .map(|s| {
+                render_plan_step(s)
+                    .lines()
+                    .map(|l| format!("  {l}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return format!("{line}\n{inner}");
+    }
+    line
 }
 
 /// StepMetrics 的人读片段:`N turns · X.Xs · $Y.YY`。render_event 与 cost 子命令共用,避免格式漂移。

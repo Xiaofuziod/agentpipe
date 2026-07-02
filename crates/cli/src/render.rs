@@ -46,8 +46,13 @@ pub fn render_event(event: &Event) -> String {
         Event::WorktreeReady { path, branch } => format!("  ⑂ worktree: {branch} @ {path}"),
         Event::WorktreeFailed { error } => format!("  ✗ worktree failed: {error}"),
         Event::LoopIteration { loop_id, iteration } => format!("  ↻ {loop_id} round {iteration}"),
-        // residual 渲染留给 Task 6(本 Task 只补字段保编译)。
-        Event::LoopConverged { loop_id, iterations, .. } => format!("  ✓ {loop_id} converged in {iterations} round(s)"),
+        Event::LoopConverged { loop_id, iterations, residual } => {
+            if *residual > 0 {
+                format!("  ✓ {loop_id} converged in {iterations} round(s), {residual} residual finding(s) allowed")
+            } else {
+                format!("  ✓ {loop_id} converged in {iterations} round(s)")
+            }
+        }
         Event::LoopMaxReached { loop_id, max, reason } => match reason {
             LoopEndReason::MaxReached => {
                 format!("  ⚠ {loop_id} hit max {max}, still not clean")
@@ -126,5 +131,13 @@ mod tests {
             metrics: None,
         };
         assert_eq!(render_event(&e), "  ⏭ lint: no changes");
+    }
+
+    #[test]
+    fn renders_loop_converged_with_residual() {
+        let e = Event::LoopConverged { loop_id: "l".into(), iterations: 2, residual: 3 };
+        assert_eq!(render_event(&e), "  ✓ l converged in 2 round(s), 3 residual finding(s) allowed");
+        let e0 = Event::LoopConverged { loop_id: "l".into(), iterations: 2, residual: 0 };
+        assert_eq!(render_event(&e0), "  ✓ l converged in 2 round(s)");
     }
 }

@@ -116,7 +116,13 @@ function Fields({
             <select
               className="select"
               value={step.action}
-              onChange={(e) => onChange({ ...step, action: e.target.value as CodexAction })}
+              onChange={(e) => {
+                const action = e.target.value as CodexAction;
+                // vet 仅 review-mr/review-doc 支持,ask 配 vet 会被 validate 拒绝;
+                // GUI 无 vet 勾选框可关,切到 ask 时必须显式剥离,否则隐形携带的
+                // vet:true 会在保存/运行时才报错且无处修(F6)。
+                onChange({ ...step, action, vet: action === "ask" ? undefined : step.vet });
+              }}
             >
               <option value="review-mr">review-mr</option>
               <option value="review-doc">review-doc</option>
@@ -182,6 +188,40 @@ function Fields({
       );
     case "loop":
       return <LoopBody step={step} depth={depth} onChange={onChange} />;
+    case "acp":
+      return (
+        <>
+          <div className="field">
+            <label className="label">agent</label>
+            <input
+              className="input input-mono"
+              placeholder="gemini / claude-acp / codex-acp"
+              value={step.agent}
+              onChange={(e) => onChange({ ...step, agent: e.target.value })}
+            />
+            <div className="hint">显示用名称(日志 / UI 标签)。</div>
+          </div>
+          <div className="field">
+            <label className="label">command</label>
+            <input
+              className="input input-mono"
+              placeholder="npx @agentclientprotocol/claude-agent-acp"
+              value={step.command}
+              onChange={(e) => onChange({ ...step, command: e.target.value })}
+            />
+            <div className="hint">启动 ACP server 的完整命令(shell-words 切分)。</div>
+          </div>
+          <div className="field">
+            <label className="label">prompt</label>
+            <textarea
+              className="textarea"
+              placeholder="给 ACP agent 的指令…"
+              value={step.prompt}
+              onChange={(e) => onChange({ ...step, prompt: e.target.value })}
+            />
+          </div>
+        </>
+      );
   }
 }
 

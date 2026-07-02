@@ -112,7 +112,11 @@ pub fn load_template(app: AppHandle, name: String) -> Result<Manifest, String> {
     }
     let p = templates_dir(&app).join(format!("{name}.yaml"));
     let yaml = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    Manifest::parse(&yaml).map_err(|e| e.to_string())
+    let manifest = Manifest::parse(&yaml).map_err(|e| e.to_string())?;
+    // 与 save_manifest / launch 同一道校验:非法模板在载入时 fail-loud 报出,
+    // 而不是留到保存/运行时才炸(那时 GUI 已经把它当成合法 manifest 渲染)。
+    manifest.validate().map_err(|e| e.to_string())?;
+    Ok(manifest)
 }
 
 // ==== 审计读命令 ====

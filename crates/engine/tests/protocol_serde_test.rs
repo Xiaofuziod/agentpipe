@@ -86,3 +86,17 @@ fn command_deserializes_from_type_tag() {
         serde_json::from_str(r#"{"type":"ApproveGate","step_id":"fix","artifact":null}"#).unwrap();
     assert!(matches!(c, Command::ApproveGate { .. }));
 }
+
+#[test]
+fn loop_converged_without_residual_defaults_zero() {
+    // 老审计日志无 residual 字段,回放必须解析成功且语义不变
+    let old = r#"{"type":"LoopConverged","loop_id":"l","iterations":2}"#;
+    let e: Event = serde_json::from_str(old).unwrap();
+    match e {
+        Event::LoopConverged { residual, iterations, .. } => {
+            assert_eq!(residual, 0);
+            assert_eq!(iterations, 2);
+        }
+        other => panic!("expected LoopConverged, got {other:?}"),
+    }
+}

@@ -1,9 +1,8 @@
-use agentpipe_engine::runner::claude::ClaudeRunner;
-use std::path::PathBuf;
+mod common;
 
-fn fixture(name: &str) -> String {
-    format!("{}/../../tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
-}
+use agentpipe_engine::runner::claude::ClaudeRunner;
+use common::fixture;
+use std::path::PathBuf;
 
 #[test]
 fn runs_and_captures_result_as_answer() {

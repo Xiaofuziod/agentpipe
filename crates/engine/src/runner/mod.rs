@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod claude;
 pub mod codex;
 
@@ -8,6 +9,16 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+/// 从环境变量读 runner 墙钟超时(秒);非正数或解析失败回落 `default`。
+/// 三家 runner(claude/codex/acp)的 `AGENTPIPE_*_TIMEOUT_SECS` 走同一套语义。
+pub(crate) fn timeout_secs_from_env(env_key: &str, default: u64) -> u64 {
+    std::env::var(env_key)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
 
 /// spawn 一个命令,返回 (stdout, exit_success)。黑盒:不解析协议,只收文本。
 ///

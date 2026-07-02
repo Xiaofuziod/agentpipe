@@ -92,25 +92,49 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
         }),
         activeGate: null,
       };
-    case "StepAwaitingGate":
-      return {
-        ...prev,
-        ...setStep(prev, e.step_id, { status: "AwaitingGate" }),
-        activeGate: {
-          step_id: e.step_id,
-          suggestion: e.suggestion,
-          expects_artifact: e.expects_artifact,
-          gate_kind: e.gate_kind,
-        },
+    case "StepAwaitingGate": {
+      const gate = {
+        step_id: e.step_id,
+        suggestion: e.suggestion,
+        expects_artifact: e.expects_artifact,
+        gate_kind: e.gate_kind,
       };
-    case "StepFinished":
+      // loop 跑满 max 轮的决策门(重试/跳过/中止)以 loop_id 当 step_id 复用同一通道
+      // (executor.rs decision_gate)。它不是真正的 step,写进 steps/order 会与下面
+      // loops 区块各自独立渲染同一个 id,产生 F3 的双渲染:Retry 后引擎不发对应的
+      // StepStarted,幽灵行永卡 AwaitingGate。改成只更新 loops[id] 的文案。
+      if (e.step_id in prev.loops) {
+        const loopEntry = prev.loops[e.step_id] ?? { iteration: 0 };
+        return {
+          ...prev,
+          loops: { ...prev.loops, [e.step_id]: { ...loopEntry, result: "等待决策(重试/跳过/中止)" } },
+          activeGate: gate,
+        };
+      }
+      return { ...prev, ...setStep(prev, e.step_id, { status: "AwaitingGate" }), activeGate: gate };
+    }
+    case "StepFinished": {
+      // 同上:用户在决策门选「跳过」时引擎发 StepFinished{Skipped, step_id: loop_id}
+      // (executor.rs emit_skipped)。同样只落 loops 文案,不产生扁平 step 行,否则
+      // 扁平流的「skipped」会与 loops 区沿用的「到上限未干净」旧文案矛盾并存。
+      if (e.step_id in prev.loops) {
+        const loopEntry = prev.loops[e.step_id] ?? { iteration: 0 };
+        const result = e.status === "Skipped" ? "已跳过(未收敛)" : e.summary;
+        return { ...prev, loops: { ...prev.loops, [e.step_id]: { ...loopEntry, result } }, activeGate: null };
+      }
       return {
         ...prev,
         ...setStep(prev, e.step_id, { status: e.status, summary: e.summary, metrics: e.metrics ?? undefined }),
         activeGate: null,
       };
+    }
     case "StepFailed":
-      return { ...prev, ...setStep(prev, e.step_id, { status: "Failed", error: e.error }) };
+      // 失败也带上已烧掉的花费(budget 触发 / verifier 重试耗尽路径的 cumulative
+      // metrics),与 StepFinished 同形,CLI 渲染同步修(codex review P3)。
+      return {
+        ...prev,
+        ...setStep(prev, e.step_id, { status: "Failed", error: e.error, metrics: e.metrics ?? undefined }),
+      };
     case "WorktreeReady":
       return {
         ...prev,
@@ -121,10 +145,24 @@ export function runReducer(prev: RunState, e: EngineEvent): RunState {
       return { ...prev, worktreeError: e.error, log: pushLog(prev.log, `✗ worktree: ${e.error}`) };
     case "LoopIteration":
       return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iteration } } };
-    case "LoopConverged":
-      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iterations, result: "收敛" } } };
-    case "LoopMaxReached":
-      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.max, result: "到上限未干净" } } };
+    case "LoopConverged": {
+      const residual = e.residual ?? 0;
+      const result = residual > 0 ? `收敛(残留 ${residual})` : "收敛";
+      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.iterations, result } } };
+    }
+    case "LoopMaxReached": {
+      // review §A finding #15:按 reason 分三档文案,旧版统一「到上限未干净」会把
+      // 外部 Abort 与 sub-step 失败误报成「跑到 max」(iteration=0 时尤其无意义)。
+      // 老审计日志无 reason → 兜底 max_reached(与后端 serde default 同形)。
+      const reason = e.reason ?? "max_reached";
+      const text =
+        reason === "aborted"
+          ? "已中止"
+          : reason === "sub_step_failed"
+          ? "子步骤失败"
+          : "到上限未干净";
+      return { ...prev, loops: { ...prev.loops, [e.loop_id]: { iteration: e.max, result: text } } };
+    }
     case "RunFinished":
       return { ...prev, runStatus: e.status, activeGate: null, log: pushLog(prev.log, `■ ${e.status}`) };
     default:

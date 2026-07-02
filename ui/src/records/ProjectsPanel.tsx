@@ -124,9 +124,7 @@ export function ProjectsPanel({
                       <span className="project-folder">▢</span>
                       <span className="project-name">{p.name}</span>
                       <span className="project-count">{p.runs.length + (showLive ? 1 : 0)}</span>
-                      {p.totalCost > 0 && (
-                        <span className="project-cost">${p.totalCost.toFixed(2)}</span>
-                      )}
+                      {/* 应用内不再展示 USD 计费(audit/CLI cost 子命令仍保留账目) */}
                     </button>
                   </div>
 
@@ -185,9 +183,7 @@ export function ProjectsPanel({
                             </div>
                             <div className="rec-meta">
                               {r.step_count} 步
-                              {r.total_cost_usd > 0 && (
-                                <span className="rec-cost"> · ${r.total_cost_usd.toFixed(2)}</span>
-                              )}
+                              {/* 应用内不再展示 USD;status 之外不附加任何计费摘要 */}
                               {r.status && <span> · {STATUS_LABEL[r.status] ?? r.status}</span>}
                             </div>
                           </div>

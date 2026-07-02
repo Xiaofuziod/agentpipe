@@ -27,6 +27,23 @@ pub struct StepMetrics {
     pub cost_usd: f64,
 }
 
+impl StepMetrics {
+    /// 两份可选 metrics 求和;任一为 None 直接返另一个。executor 的 verify-retry
+    /// 累积与 codex vet 双调用共用(SSOT)—— 同一 step 内发生多次底层调用时必须
+    /// 求和而非覆盖,否则成本只上报最后一次,budget 系统性低估(review §A finding #4
+    /// 修过 claude 路径的同源问题,vet 路径对齐同一模式,review finding #7)。
+    pub fn sum(a: Option<StepMetrics>, b: Option<StepMetrics>) -> Option<StepMetrics> {
+        match (a, b) {
+            (None, x) | (x, None) => x,
+            (Some(a), Some(b)) => Some(StepMetrics {
+                num_turns: a.num_turns + b.num_turns,
+                duration_ms: a.duration_ms + b.duration_ms,
+                cost_usd: a.cost_usd + b.cost_usd,
+            }),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Event {
@@ -59,15 +76,58 @@ pub enum Event {
         #[serde(default)]
         metrics: Option<StepMetrics>,
     },
-    StepFailed { step_id: String, error: String },
+    /// Step 失败终态。metrics 携带失败前已累积的成本(verify-retry 中段 / OnUnmet::Fail /
+    /// budget 触发等场景),让 audit::aggregate_cost 不再因失败路径漏统计。
+    /// review §A finding #4:旧版无 metrics 字段时 audit 总成本 = $0,与 ctx.cost_so_far_usd
+    /// 真实账目脱节,触发"budget 把 step 砍掉,UI 却显示一分钱没花"的反认知体验。
+    /// `#[serde(default)]` 保持向后兼容老审计日志(legacy NDJSON 无此字段 → None,与
+    /// 新无 cost 失败语义一致 = 该 step 不入 audit cost,避免漂移)。
+    StepFailed {
+        step_id: String,
+        error: String,
+        #[serde(default)]
+        metrics: Option<StepMetrics>,
+    },
     /// 隔离 worktree 创建成功:后续所有 step 在此 cwd 跑。RunStarted 之后立即发。
     WorktreeReady { path: String, branch: String },
     /// 隔离 worktree 创建失败:Run fail-closed 终止(不退回 target 原地跑)。
     WorktreeFailed { error: String },
     LoopIteration { loop_id: String, iteration: u32 },
-    LoopConverged { loop_id: String, iterations: u32 },
-    LoopMaxReached { loop_id: String, max: u32 },
+    LoopConverged {
+        loop_id: String,
+        iterations: u32,
+        /// 带残留收敛(allow_residual)时的遗留 finding 数;verdict-clean 收敛通常为 0。
+        /// serde default 兼容老审计日志(缺字段 → 0,回放语义不变)。
+        #[serde(default)]
+        residual: u32,
+    },
+    /// Loop 终止事件。reason 区分三种结束原因:自然 max(原义)、外部 Abort、sub-step 失败
+    /// 透传 —— UI/CLI 渲染应按 reason 出不同文案,而非旧版统一的「hit max,still not clean」
+    /// 误导文本(review §A finding #15)。`#[serde(default)]` 让老审计日志解析回退 MaxReached,
+    /// 历史回放语义不变。
+    LoopMaxReached {
+        loop_id: String,
+        max: u32,
+        #[serde(default)]
+        reason: LoopEndReason,
+    },
     RunFinished { status: RunStatus },
+}
+
+/// Loop 终止原因。MaxReached 保留原义(自然耗尽 max 仍未收敛);Aborted/SubStepFailed
+/// 是 review §A finding #15 加的语义化分流,前 PR 共用 MaxReached variant 导致渲染层
+/// 把"外部中止"误读为"loop 跑到上限"。
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopEndReason {
+    /// 跑完 max 轮 until 仍未满足。
+    #[default]
+    MaxReached,
+    /// 外部 Control::request_abort / 用户 Abort 决策门。
+    Aborted,
+    /// loop body 内 sub-step 失败 Err 透传(charge_and_check Err / decision gate Abort /
+    /// runner 自身失败被升级 fail)。
+    SubStepFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -88,9 +148,31 @@ pub enum Command {
     Abort,
 }
 
+/// 单条结构化 finding(engine 内部类型,不进 NDJSON 事件协议)。
+/// severity 用 context::Severity(未知串在 codex runner 侧已 parse_lossy 归一)。
+#[derive(Debug, Clone)]
+pub struct FindingItem {
+    pub severity: crate::context::Severity,
+    pub file: String,
+    pub line: i64,
+    pub summary: String,
+    pub suggestion: String,
+}
+
 /// 供 codex runner 复用的结果类型
 #[derive(Debug, Clone)]
 pub struct ReviewResult {
     pub verdict: Verdict,
     pub findings: String,
+    /// 结构化 findings(severity 收敛判定用)。见 FindingItem。
+    pub items: Vec<FindingItem>,
+    /// 本结果是否来自"输出不可解析"的兜底(而非成功解析)。合法输出
+    /// `{verdict: changes_requested, findings: []}` 与解析 fallback 的 verdict/items
+    /// 形状完全相同,收敛判定对两者同样保守,但根因不同 —— 该标志让 runner 能对
+    /// "模型自相矛盾输出"单独发提示(review finding #10)。
+    pub parse_failed: bool,
+    /// codex 本次 review 的成本/轮次/耗时。codex CLI 当前不输出 token usage,所以
+    /// 实际填 None;字段先就位让 verify_once 把 verifier cost 上报给 budget,等
+    /// codex CLI 升级输出 metrics 后直接填,无需再改 schema。
+    pub metrics: Option<StepMetrics>,
 }

@@ -1,15 +1,12 @@
+mod common;
+
 use agentpipe_engine::control::Control;
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
-use agentpipe_engine::protocol::{Command, Event, RunStatus, StepStatus};
+use agentpipe_engine::protocol::{Command, Event, LoopEndReason, RunStatus, StepStatus};
+use common::{fixture, EnvGuard, ENV_LOCK};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn fixture(name: &str) -> String {
-    format!("{}/../../tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
-}
+use std::sync::Arc;
 
 fn test_control() -> Arc<Control> {
     Arc::new(Control::default())
@@ -20,6 +17,28 @@ fn stub_bins() -> RunnerBins {
         claude: fixture("stub-claude.sh"),
         codex: fixture("stub-codex.sh"),
     }
+}
+
+/// review-loop 测试清单:单 codex step(rev)+ 可选 allow_residual / 可选 fix claude
+/// step 的固定形状。10 个 P1/P2/P4/P6 loop 测试共用,改 loop step 形状只动这一处。
+fn loop_yaml(max: u32, allow_residual: Option<&str>, fix_prompt: Option<&str>) -> String {
+    let residual = allow_residual
+        .map(|s| format!("\n    allow_residual: {s}"))
+        .unwrap_or_default();
+    let fix = fix_prompt
+        .map(|p| {
+            // 本 helper 不做 YAML 转义:含 `"` 会解析报错错位、含 `\` + 常见字母会被
+            // serde_yml 当转义静默替换(语义腰斩零报错,review finding #15)。fail-loud 拦下。
+            assert!(
+                !p.contains('"') && !p.contains('\\'),
+                "loop_yaml 不做 YAML 转义:fix_prompt 不能含 \" 或 \\(会静默腰斩或报错错位),请改用安全字符"
+            );
+            format!("\n      - id: fix\n        kind: claude\n        prompt: \"{p}\"")
+        })
+        .unwrap_or_default();
+    format!(
+        "\nversion: 1\nname: t\ntarget: .\nmode: auto\nsteps:\n  - id: fixloop\n    kind: loop\n    until: codex-clean\n    max: {max}{residual}\n    body:\n      - id: rev\n        kind: codex\n        action: review-mr\n        base: HEAD{fix}\n"
+    )
 }
 
 #[test]
@@ -35,7 +54,7 @@ steps:
   - id: rev
     kind: codex
     action: review-mr
-    base: dev
+    base: HEAD
   - id: fix
     kind: claude
     prompt: "用 {{rev.findings}}"
@@ -72,7 +91,7 @@ steps:
   - id: rev
     kind: codex
     action: review-mr
-    base: dev
+    base: HEAD
 "#;
     let m = Manifest::parse(yaml).unwrap();
     let (etx, erx) = mpsc::channel();
@@ -91,26 +110,8 @@ steps:
 fn loop_converges_when_codex_clean() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "clean");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 3
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: dev
-      - id: fix
-        kind: claude
-        prompt: "修 {{rev.findings}}"
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(3, None, Some("修 {{rev.findings}}"));
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (_c, crx) = mpsc::channel::<Command>();
     let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
@@ -125,25 +126,12 @@ steps:
 fn loop_hits_max_when_never_clean() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "changes_requested");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 2
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: dev
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(2, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
-    let (_c, crx) = mpsc::channel::<Command>();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    // P1:自然耗尽 max 后 run_loop 过决策门阻塞等命令,预灌 Skip 收尾(否则 recv 永久挂死)。
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
     let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
     ex.run();
     let events: Vec<_> = erx.try_iter().collect();
@@ -161,6 +149,62 @@ steps:
     assert!(events
         .iter()
         .any(|e| matches!(e, Event::StepStarted { step_id, kind } if step_id == "rev" && kind == "codex")));
+}
+
+#[test]
+fn loop_base_ref_missing_fails_loud_without_spinning_to_max() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("STUB_VERDICT", "changes_requested");
+    // 活锁的对偶面回归:base ref 不存在时,review-mr 必须 fail-loud 走失败决策门,
+    // 而不是把 changes_requested 喂回 loop 空转到 max(已观测:9 轮烧 $16)。
+    // 预置 Abort 消费第一次决策门 → 断言只跑了 1 轮 review、未到 max。
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 5
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: agentpipe-nonexistent-base-ref
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx_tx, crx) = mpsc::channel();
+    ctx_tx.send(Command::Abort).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    ex.run();
+    let events: Vec<_> = erx.try_iter().collect();
+    // fail-loud:发了 StepFailed
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::StepFailed { step_id, .. } if step_id == "rev")),
+        "base 缺失应发 StepFailed(fail-loud)"
+    );
+    // 不空转:review 只 Started 1 次,绝不跑满 max
+    let rev_starts = events
+        .iter()
+        .filter(|e| matches!(e, Event::StepStarted { step_id, .. } if step_id == "rev"))
+        .count();
+    assert_eq!(rev_starts, 1, "base 缺失应首轮即 fail-loud,不空转");
+    // 注:review-2 §E finding #11 后,sub-step Err 透传时 run_loop 复用 LoopMaxReached
+    // 作"loop 因外因停止"信号(避免新 Event 变体跨端代价)。max 字段反映触发时的实际
+    // iteration 数,与 manifest max=5 不同,可借此区分"跑满"vs"中段停"。
+    let loop_max_reached: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::LoopMaxReached { max, .. } => Some(*max),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(loop_max_reached, vec![1], "应在第 1 次 iteration 中段 emit LoopMaxReached{{max=1}},而非跑满 max=5");
 }
 
 /// 跑一个带 verify 的单 claude step,返回收到的事件流。
@@ -198,7 +242,7 @@ fn count_progress(events: &[Event], needle: &str) -> usize {
 #[test]
 fn verify_clean_passes_without_retry() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let events = run_verify_step("clean", "      by: codex\n      action: review-mr\n      base: dev");
+    let events = run_verify_step("clean", "      by: codex\n      action: review-mr\n      base: HEAD");
     assert_eq!(count_progress(&events, "校验未通过"), 0);
     assert!(events.iter().any(|e| matches!(
         e,
@@ -214,7 +258,7 @@ fn verify_unmet_retries_to_max_then_fails() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let events = run_verify_step(
         "changes_requested",
-        "      by: codex\n      action: review-mr\n      base: dev\n      max_retries: 2\n      on_unmet: fail",
+        "      by: codex\n      action: review-mr\n      base: HEAD\n      max_retries: 2\n      on_unmet: fail",
     );
     // 重试 2 次 → 2 条"校验未通过"
     assert_eq!(count_progress(&events, "校验未通过"), 2);
@@ -229,7 +273,7 @@ fn verify_unmet_continue_proceeds() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let events = run_verify_step(
         "changes_requested",
-        "      by: codex\n      action: review-mr\n      base: dev\n      max_retries: 1\n      on_unmet: continue",
+        "      by: codex\n      action: review-mr\n      base: HEAD\n      max_retries: 1\n      on_unmet: continue",
     );
     assert!(events.iter().any(|e| matches!(
         e,
@@ -257,7 +301,7 @@ steps:
     verify:
       by: codex
       action: review-mr
-      base: dev
+      base: HEAD
       max_retries: 0
       on_unmet: gate
 "#;
@@ -359,7 +403,7 @@ steps:
   - id: rev
     kind: codex
     action: review-mr
-    base: dev
+    base: HEAD
 "#;
     let m = Manifest::parse(yaml).unwrap();
     let (etx, erx) = mpsc::channel();
@@ -453,5 +497,489 @@ steps:
     assert!(
         events.iter().any(|e| matches!(e, Event::StepAwaitingGate { step_id, .. } if step_id == "mr")),
         "空预置值应回退到人工 gate"
+    );
+}
+
+#[test]
+fn budget_exceeded_aborts_run_at_first_overrun() {
+    // stub-claude 每步 cost_usd = 0.01。budget = 0.005 < 0.01 → 第 1 个 claude step 完成后
+    // charge_and_check 触发 over budget,立刻 emit 单条 StepFailed("超出 USD budget...")
+    // + return Err → run() 主循环走 RunStatus::Aborted,第 2 步不启动。
+    //
+    // **不再双 emit**:新 spec(2026-06-26 review-findings-fix §C)语义是 charge 触发时只发
+    // StepFailed,不发 StepFinished —— 避免同一 step_id 既 Done 又 Failed 的矛盾终态。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    std::env::set_var("STUB_VERDICT", "clean");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+budget_usd: 0.005
+steps:
+  - id: first
+    kind: claude
+    prompt: "step1"
+  - id: second
+    kind: claude
+    prompt: "step2"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    assert!(m.validate().is_ok());
+    let (etx, erx) = mpsc::channel();
+    let (_ctx, crx) = mpsc::channel::<Command>();
+
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+
+    assert_eq!(status, RunStatus::Aborted, "超 budget 应走 Aborted,不是 Failed");
+    let events: Vec<Event> = erx.try_iter().collect();
+
+    // 第 2 步必须没启动(charge 在第 1 步 spawn 后立即触发停)
+    let started_second = events
+        .iter()
+        .any(|e| matches!(e, Event::StepStarted { step_id, .. } if step_id == "second"));
+    assert!(!started_second, "第 2 步不该启动,实际事件: {events:?}");
+
+    // budget 错误必须有解释性 StepFailed,且 step_id = "first"
+    let budget_err = events.iter().any(|e| {
+        matches!(e, Event::StepFailed { step_id, error, .. } if step_id == "first" && error.contains("超出 USD budget"))
+    });
+    assert!(budget_err, "应 emit 含 '超出 USD budget' 的 StepFailed 事件: {events:?}");
+
+    // 关键:第 1 步**不应**有 StepFinished{Done},charge 触发就停 —— 避免双 emit 矛盾终态。
+    let finished_first = events.iter().any(
+        |e| matches!(e, Event::StepFinished { step_id, status, .. } if step_id == "first" && *status == StepStatus::Done),
+    );
+    assert!(!finished_first, "charge 触发时不应 emit StepFinished(避免同 step_id 既 Done 又 Failed)");
+}
+
+#[test]
+fn step_finished_metrics_include_verifier_cost_not_just_last_attempt() {
+    // review-2 §B 主修目标(finding #2 + #5 + #7):StepFinished.metrics 必须反映该 step
+    // 内**所有** spawn 的累加成本(attempt + verifier),而非只末次 attempt 一份;否则
+    // audit::aggregate_cost 和 GUI total cost 系统性低估。
+    //
+    // stub-claude 每次返 cost=0.01;Claude step + Claude verify(verdict=pass 一次过)→
+    // 应当 cumulate 1 attempt + 1 verifier = 0.02。改造前只看到 0.01。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _v = EnvGuard::set("STUB_VERDICT", "clean");
+    let _r = EnvGuard::set("STUB_CLAUDE_RESULT", "VERDICT: pass");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: do
+    kind: claude
+    prompt: "干活"
+    verify:
+      by: claude
+      prompt: "判定"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_ctx, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+
+    assert_eq!(status, RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    let metrics = events.iter().find_map(|e| match e {
+        Event::StepFinished { step_id, metrics: Some(m), .. } if step_id == "do" => Some(m.clone()),
+        _ => None,
+    });
+    let m = metrics.expect("StepFinished 应带 metrics");
+    // 1 attempt + 1 verifier × 0.01 = 0.02。改造前只看到 0.01。
+    assert!(
+        (m.cost_usd - 0.02).abs() < 1e-9,
+        "StepFinished metrics 应累积 attempt+verifier cost,期望 0.02,实际 {}",
+        m.cost_usd
+    );
+    // num_turns 同样累加(stub 每次返 1)
+    assert_eq!(m.num_turns, 2, "num_turns 应累加 attempt+verifier");
+}
+
+#[test]
+fn budget_charges_each_verify_retry_attempt_and_verifier() {
+    // spec §3.1 主修复目标:verify-retry 中段每次 attempt + verifier cost 都入账,
+    // 不再只看末次 attempt 的 metrics(以前 finish 路径漏统计 N-1 次 attempt + verifier 全部)。
+    //
+    // stub-claude 每次返 cost=0.01,STUB_CLAUDE_RESULT="VERDICT: fail" 让 claude verifier 始终判
+    // 未通过 → 触发 retry。verify max_retries=2 / on_unmet=fail,即一个 step 最多跑 3 次干活 +
+    // 3 次 verifier = 6 次 claude.run。budget=0.045 → 第 5 次 charge 累计 0.05 > 0.045 触发 abort。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _v = EnvGuard::set("STUB_VERDICT", "clean");
+    let _r = EnvGuard::set("STUB_CLAUDE_RESULT", "VERDICT: fail");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+budget_usd: 0.045
+steps:
+  - id: do
+    kind: claude
+    prompt: "干活"
+    verify:
+      by: claude
+      prompt: "判定"
+      max_retries: 2
+      on_unmet: fail
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_ctx, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+
+    assert_eq!(status, RunStatus::Aborted, "verify-retry 中段触发 budget 应 Aborted");
+    let events: Vec<Event> = erx.try_iter().collect();
+    let budget_err = events.iter().any(|e| {
+        matches!(e, Event::StepFailed { step_id, error, .. } if step_id == "do" && error.contains("超出 USD budget"))
+    });
+    assert!(
+        budget_err,
+        "verify-retry 中段必须能触发 budget StepFailed(否则 verifier/retry cost 全漏): {events:?}"
+    );
+    // review §A finding #4 守护:budget 触发的 StepFailed 必须携带 cumulative metrics,
+    // 让 audit::aggregate_cost 能正确合计失败 step 的真实花费(旧版 StepFailed 无 metrics
+    // 字段,audit 总成本永远 $0,与 ctx.cost_so_far_usd 真实账目脱节)。
+    let metrics_in_failed = events.iter().find_map(|e| match e {
+        Event::StepFailed { step_id, metrics: Some(m), error, .. }
+            if step_id == "do" && error.contains("超出 USD budget") =>
+        {
+            Some(m.clone())
+        }
+        _ => None,
+    });
+    let m = metrics_in_failed
+        .expect("budget StepFailed 必须携带 cumulative metrics(review §A finding #4)");
+    // 触发时已经至少 charge 了 ≥ budget(0.045)的累积成本,且每次单位 0.01。
+    assert!(
+        m.cost_usd >= 0.045,
+        "StepFailed.metrics 应反映 cumulative 而非单次,期望 ≥ 0.045,实际 {}",
+        m.cost_usd
+    );
+}
+
+#[test]
+fn loop_max_reached_carries_distinct_reason_for_each_termination_path() {
+    // review §A finding #15 守护:LoopMaxReached.reason 区分自然 max / 外部 abort /
+    // sub-step 失败三条路径,UI/CLI 渲染按 reason 出不同文案。本 test 覆盖 sub-step
+    // 失败路径(SubStepFailed)— 借用 base_ref_missing 已有的活锁防御场景:base 不
+    // 存在 → review fail-loud → decision gate Abort → sub-step Err 透传 → loop
+    // emit LoopMaxReached{reason: SubStepFailed, max: 1}。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _v = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 5
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: agentpipe-nonexistent-base-ref
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx_tx, crx) = mpsc::channel();
+    ctx_tx.send(Command::Abort).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    ex.run();
+    let events: Vec<Event> = erx.try_iter().collect();
+    // 必有一条 LoopMaxReached{reason: SubStepFailed}
+    let sub_failed = events.iter().any(|e| {
+        matches!(
+            e,
+            Event::LoopMaxReached { loop_id, reason: LoopEndReason::SubStepFailed, .. }
+                if loop_id == "fixloop"
+        )
+    });
+    assert!(
+        sub_failed,
+        "sub-step Err 透传应 emit LoopMaxReached.reason=SubStepFailed: {events:?}"
+    );
+}
+
+#[test]
+fn step_gate_abort_classifies_run_as_aborted_not_failed() {
+    // review §A finding #13 守护:用户在 step 门控 / 决策门 选 Abort 时,executor 必须
+    // 翻 control.request_abort,让 run() 顶层分类落 RunStatus::Aborted(用户主动中止),
+    // 而非误分类为 Failed(引擎失败)。本 test 通过 step 模式发 Abort 验证。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _v = EnvGuard::set("STUB_VERDICT", "clean");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: step
+steps:
+  - id: only
+    kind: claude
+    prompt: "hi"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx_tx, crx) = mpsc::channel();
+    // step 门控 Abort:while waiting at first gate,发 Abort
+    ctx_tx.send(Command::Abort).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+    assert_eq!(
+        status,
+        RunStatus::Aborted,
+        "用户经决策门 Abort 必须分类为 RunStatus::Aborted,实际 {status:?}"
+    );
+    let events: Vec<Event> = erx.try_iter().collect();
+    let saw_finished_aborted = events.iter().any(|e| {
+        matches!(e, Event::RunFinished { status } if matches!(status, RunStatus::Aborted))
+    });
+    assert!(saw_finished_aborted, "RunFinished 必须报 Aborted: {events:?}");
+}
+
+#[test]
+fn codex_review_mr_base_interpolated_from_artifact_trims_whitespace_and_newlines() {
+    // review §B follow-up:模板用 `base: "{{xxx.artifact}}"` 动态解析 base 时,LLM
+    // artifact 常带末尾换行 / 多余空格(指令"只输出 X"也未必严格遵守)。
+    // interpolate_identifier 必须 trim 取首行非空,否则 git rev-parse 喂含 `\n` 的 ref
+    // 必然失败,错误信息含原始字符让用户更难定位。
+    // 本测试:让一个 human step 输出 "HEAD\n  " 作为 artifact,下游 review-mr 用插值,
+    // 引擎应该 trim 后传 "HEAD" 给 codex(可解析 → 走 stub → 正常完成)。
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _v = EnvGuard::set("STUB_VERDICT", "clean");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: base-detect
+    kind: human
+    instruction: "模拟 LLM 输出 base 分支名"
+    value: "HEAD\n  "
+  - id: review
+    kind: codex
+    action: review-mr
+    base: "{{base-detect.artifact}}"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_ctx, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+    assert_eq!(
+        status,
+        RunStatus::Success,
+        "trim 后 base=HEAD 应可解析,review 应正常完成,实际 {status:?}"
+    );
+    let events: Vec<Event> = erx.try_iter().collect();
+    // 不应有"无法解析"或"必须提供"的 fail-loud StepFailed
+    let unwanted = events.iter().any(|e| {
+        matches!(
+            e,
+            Event::StepFailed { step_id, error, .. }
+                if step_id == "review"
+                && (error.contains("无法解析") || error.contains("必须提供 base"))
+        )
+    });
+    assert!(!unwanted, "base 经 trim 后应正常 review,不该 fail-loud: {events:?}");
+}
+
+/// P1:自然耗尽 max → 决策门;预灌 Skip → StepFinished{Skipped} + run Success。
+#[test]
+fn loop_max_gates_and_skip_continues() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let yaml = loop_yaml(2, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+    assert_eq!(status, RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(events.iter().any(|e| matches!(e,
+        Event::StepAwaitingGate { step_id, gate_kind: agentpipe_engine::protocol::GateKind::Decision, .. }
+            if step_id == "fixloop")),
+        "耗尽 max 必须弹决策门");
+    assert!(events.iter().any(|e| matches!(e,
+        Event::StepFinished { step_id, status: StepStatus::Skipped, .. } if step_id == "fixloop")),
+        "Skip 必须留审计痕");
+}
+
+/// P1:预灌 Abort → RunStatus::Aborted。
+#[test]
+fn loop_max_gate_abort_aborts_run() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let yaml = loop_yaml(2, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::Abort).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Aborted);
+    let _ = erx; // 事件断言可省:状态即契约
+}
+
+/// P1:Approve(Retry)→ 再跑 max 轮且 iteration 续号(1,2,3,4),第二次门 Skip 收尾。
+#[test]
+fn loop_max_gate_retry_continues_iteration_numbering() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let yaml = loop_yaml(2, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::ApproveGate { step_id: "fixloop".into(), artifact: None }).unwrap();
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let iters: Vec<u32> = erx.try_iter().filter_map(|e| match e {
+        Event::LoopIteration { iteration, .. } => Some(iteration),
+        _ => None,
+    }).collect();
+    assert_eq!(iters, vec![1, 2, 3, 4], "Retry 后编号必须续 3,4 而非重开 1,2");
+}
+
+/// P6:review 首轮即 clean → fix 被跳过(Skipped 且非 Started),LoopConverged 在场。
+#[test]
+fn loop_short_circuits_body_after_anchor_clean() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "clean");
+    let yaml = loop_yaml(3, None, Some("修 {{rev.findings}}"));
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_c, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(!events.iter().any(|e| matches!(e,
+        Event::StepStarted { step_id, .. } if step_id == "fix")),
+        "收敛轮 fix 不得启动(P6 主修:不再空烧一次)");
+    assert!(events.iter().any(|e| matches!(e,
+        Event::StepFinished { step_id, status: StepStatus::Skipped, .. } if step_id == "fix")));
+    assert!(events.iter().any(|e| matches!(e, Event::LoopConverged { iterations: 1, .. })));
+}
+
+/// P2:全 minor findings + allow_residual: minor → 带残留收敛,residual=1。
+#[test]
+fn loop_converges_with_residual_below_threshold() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let _s = EnvGuard::set("STUB_SEVERITY", "minor");
+    let yaml = loop_yaml(3, Some("minor"), None);
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_c, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(events.iter().any(|e| matches!(e,
+        Event::LoopConverged { iterations: 1, residual: 1, .. })),
+        "minor ≤ minor 应第 1 轮带残留收敛: {events:?}");
+}
+
+/// P2:severity=high(未知串 → Critical)超过 minor 阈值 → 不收敛,耗尽 max 走门。
+#[test]
+fn loop_blocks_when_severity_above_threshold() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let _s = EnvGuard::set("STUB_SEVERITY", "high"); // 未知串,fail-closed → Critical
+    let yaml = loop_yaml(2, Some("minor"), None);
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(!events.iter().any(|e| matches!(e, Event::LoopConverged { .. })));
+    assert!(events.iter().any(|e| matches!(e,
+        Event::LoopMaxReached { reason: LoopEndReason::MaxReached, .. })));
+}
+
+/// P2 fail-closed:items 空 + changes_requested(= 解析 fallback 的形状)必须不收敛,
+/// 即便配了 allow_residual —— 放行等于把"无法解析 Codex 输出"判过。
+#[test]
+fn loop_never_converges_on_empty_items_with_changes_requested() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let _f = EnvGuard::set("STUB_FINDINGS", "[]");
+    let yaml = loop_yaml(2, Some("major"), None);
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(!events.iter().any(|e| matches!(e, Event::LoopConverged { .. })),
+        "items 空 + 非 clean 绝不能收敛(fail-closed)");
+}
+
+/// P4 端到端:loop 第 2 轮 fix prompt 里 {{rev.history}} 展开为第 1 轮 findings。
+/// 可观测面:tests/fixtures/stub-claude.sh 的 assistant 行回显 "STUB CLAUDE 收到: <prompt压扁>",
+/// 经 StreamParser derive_label → StepProgress.line,但 label 截断 60 字符 ——
+/// 所以 fix prompt 故意写短("H:{{rev.history}}"),保证 "第 1 轮" 落在截断窗口内。
+#[test]
+fn fix_prompt_receives_history_on_second_round() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let yaml = loop_yaml(2, None, Some("H:{{rev.history}}"));
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let fix_lines: Vec<String> = erx.try_iter().filter_map(|e| match e {
+        Event::StepProgress { step_id, line, .. } if step_id == "fix" => Some(line),
+        _ => None,
+    }).collect();
+    // 第 1 轮 history 空("STUB CLAUDE 收到: H:"),第 2 轮含第 1 轮 findings 头
+    assert!(fix_lines.iter().any(|l| l.contains("第 1 轮")),
+        "第 2 轮 fix prompt 必须展开 history,实际 progress 行: {fix_lines:?}");
+}
+
+/// review finding #1 回归:max=0 让 body 永不执行且决策门 Retry 原地打转(活锁),
+/// 必须在 validate 阶段拒绝。
+#[test]
+fn loop_max_zero_rejected_by_validate() {
+    let yaml = loop_yaml(0, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
+    let err = m.validate().unwrap_err();
+    assert!(err.to_string().contains("max"), "err = {err}");
+}
+
+/// review finding #2 回归:codex 输出 verdict=clean 但 findings 非空(schema 不约束
+/// 两字段联动),Clean 分支收敛的 residual 必须为 0 —— 非零会让 CLI/UI 的
+/// "residual allowed / 残留" 文案误导用户以为配置了 allow_residual。
+#[test]
+fn residual_zero_on_clean_verdict_even_with_findings() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "clean"); // stub 默认 findings 非空
+    let yaml = loop_yaml(3, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_c, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::LoopConverged { residual: 0, .. })),
+        "Clean 分支收敛 residual 必须为 0: {events:?}"
     );
 }

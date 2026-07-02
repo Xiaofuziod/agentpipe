@@ -39,14 +39,14 @@ STUB_VERDICT=clean \
 | kind | 说明 |
 |---|---|
 | claude | 让 Claude 一次性完成一个指令(可引用 skill);一律以 CLI 最高权限(bypassPermissions)跑 |
-| codex | Codex 审文档(review-doc)/ 审仓库改动(review-mr)/ 问一句(ask) |
+| codex | Codex 审文档(review-doc)/ 审仓库改动(review-mr)/ 问一句(ask);可选 vet: true 加一次只读自反驳核验 —— 核实不了的 finding 会在喂给修复步骤前被过滤(核验本身失败则保留原始 findings) |
 | human | 人去做(通常在自己的 Claude Code 会话),引擎等批准与产物 |
-| loop | 包一段子步骤,until: codex-clean 收敛或到 max 上限退出 |
+| loop | 包一段子步骤,until: codex-clean 收敛(在循环体最后一个 codex step 跑完后立即判定,收敛则跳过该轮剩余 step,不再空跑一轮修复);到 max 上限走人工决策门(重试 / 跳过 / 中止),不静默放行;可选 allow_residual: minor\|major\|nit,残留 findings 全部不高于该严重度也算收敛 |
 
 ## 模板
 
 - `templates/full-pipeline.yaml` — 完整 9 步全自动流程(brainstorm → Claude 审 → Codex 审 → 出执行文档 → 写码建 MR → code-review + simplify → Codex 审 MR 循环到干净 → 存记忆)
-- `templates/mr-review-loop.yaml` — 输入 MR 链接 → Codex 审 MR → Claude 按反馈修复并 push → 再审,循环直到 Codex 判定干净(`base` 改成该 MR 的目标分支)
+- `templates/mr-review-loop.yaml` — 输入 MR 链接 → Codex 审 MR → Claude 按反馈修复并 push → 再审,循环直到 Codex 判定干净(`base` 改成该 MR 的目标分支)。fix 提示词会带上 `{{review.history}}`(此前轮次 Codex 反馈过的问题),避免反复改
 
 ## GUI(Tauri 桌面端)
 

@@ -18,8 +18,8 @@ describe("diffRowText", () => {
     expect(text).toBe("+ lint: 仅 B (Failed)");
   });
 
-  it("changed 含双向 status 与成本(null cost 当 0)", () => {
+  it("changed 含双向 status,不展示 USD(应用内不计费,2026-06-26 用户裁决)", () => {
     const text = diffRowText({ step_id: "test", kind: "changed", a_status: "Done", a_cost: null, b_status: "Failed", b_cost: 0.3 });
-    expect(text).toBe("~ test: Done $0.00 → Failed $0.30");
+    expect(text).toBe("~ test: Done → Failed");
   });
 });

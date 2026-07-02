@@ -13,6 +13,11 @@ pub struct Manifest {
     /// 关闭时不序列化,保持现存模板 / YAML diff 干净;缺字段默认 false(向后兼容)。
     #[serde(default, skip_serializing_if = "is_false")]
     pub worktree: bool,
+    /// per-run USD 总额上限(累计 step 的 cost_usd,超过即 fail-loud 中止)。
+    /// 省略(None) = 无限制,保持向后兼容;> 0 才生效,validate 拒非正数。
+    /// 见 docs/specs/2026-06-26-review-loop-budget-and-verdict-design.md §3.1。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_usd: Option<f64>,
     pub steps: Vec<Step>,
 }
 
@@ -54,6 +59,11 @@ pub enum StepKind {
         base: Option<String>,
         #[serde(default)]
         prompt: Option<String>,
+        /// 可选自反驳核验:review 结果非 clean 时追加一次 read-only codex 调用,
+        /// 逐条用代码证据复核 findings,误报在喂给下游 fixer 前被过滤。
+        /// 仅 review-mr / review-doc;ask 配 vet 被 validate 拒绝。
+        #[serde(default, skip_serializing_if = "is_false")]
+        vet: bool,
     },
     Human {
         instruction: String,
@@ -68,7 +78,23 @@ pub enum StepKind {
     Loop {
         until: String,
         max: u32,
+        /// 可选 severity 阈值收敛:findings 全部 ≤ 此级别时视同收敛(residual 保留不修)。
+        /// 缺省 = 只认 verdict clean。取值 nit|minor|major;critical 被 validate 拒绝。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        allow_residual: Option<crate::context::Severity>,
         body: Vec<Step>,
+    },
+    /// 通用 ACP (Agent Client Protocol) 步骤:把任何实现 ACP server 的外部 agent
+    /// (claude-agent-acp / codex-acp / gemini-cli --acp / ...)接入 pipeline。
+    /// 设计见 docs/specs/2026-06-25-acp-integration-design.md。MVP 不带 skill / verify。
+    Acp {
+        /// 显示用 agent 名称(日志 / UI 展示用,例 "gemini" / "claude-acp")。
+        agent: String,
+        /// 启动外部 ACP server 的完整命令(shell-words 切分),例:
+        /// `"npx @agentclientprotocol/claude-agent-acp"` 或绝对路径 + args。
+        command: String,
+        /// 提示词;支持 `{{step-id.field}}` 插值。
+        prompt: String,
     },
 }
 
@@ -146,10 +172,35 @@ impl Manifest {
     }
 
     pub fn validate(&self) -> Result<(), EngineError> {
+        if let Some(b) = self.budget_usd {
+            // NaN / 负数 / 0 都无意义(0 = 任何 step 完成就触发,无法跑);用 is_finite 防 inf/NaN 误配。
+            if !b.is_finite() || b <= 0.0 {
+                return Err(EngineError::Validation(format!(
+                    "budget_usd 必须为正有限数,实际 {b}"
+                )));
+            }
+        }
         for step in &self.steps {
             Self::validate_step(step)?;
         }
         Ok(())
+    }
+
+    /// 非空字段校验(trim 后)。带 step_id + 字段名 + 可选 hint,统一错误文案模板。
+    fn require_non_empty(
+        step_id: &str,
+        field: &str,
+        value: &str,
+        hint: Option<&str>,
+    ) -> Result<(), EngineError> {
+        if value.trim().is_empty() {
+            let hint = hint.map(|h| format!(" ({h})")).unwrap_or_default();
+            Err(EngineError::Validation(format!(
+                "step '{step_id}': 需要 {field} 字段{hint}"
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     /// codex 判据三个 action 的必填字段校验(codex step 与 verify 门复用)。
@@ -198,12 +249,12 @@ impl Manifest {
                             }
                         }
                         Verifier::Command => {
-                            if v.command.as_deref().map(str::trim).unwrap_or("").is_empty() {
-                                return Err(EngineError::Validation(format!(
-                                    "step '{}': verify by command 需要 command 字段(shell 命令),例: command: \"cargo test\"",
-                                    step.id
-                                )));
-                            }
+                            Self::require_non_empty(
+                                &step.id,
+                                "verify command",
+                                v.command.as_deref().unwrap_or(""),
+                                Some("shell 命令,例: command: \"cargo test\""),
+                            )?;
                         }
                     }
                     if v.max_retries > MAX_VERIFY_RETRIES {
@@ -215,16 +266,29 @@ impl Manifest {
                 }
                 Ok(())
             }
-            StepKind::Codex {
-                action,
-                path,
-                base,
-                prompt,
-            } => Self::validate_codex_fields(&step.id, "codex", action, path, base, prompt),
-            StepKind::Loop { body, until, .. } => {
+            StepKind::Codex { action, path, base, prompt, vet } => {
+                Self::validate_codex_fields(&step.id, "codex", action, path, base, prompt)?;
+                if *vet && *action == CodexAction::Ask {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': vet 仅支持 review-mr / review-doc(ask 无结构化 findings 可核)",
+                        step.id
+                    )));
+                }
+                Ok(())
+            }
+            StepKind::Loop { body, until, allow_residual, max, .. } => {
                 if until != "codex-clean" {
                     return Err(EngineError::Validation(format!(
                         "step '{}': Phase 1 仅支持 until: codex-clean",
+                        step.id
+                    )));
+                }
+                // max=0 时 run_loop 的 for (base+1)..=(base+max) 恒为空区间:body 一次
+                // 不跑直接弹决策门,且 Retry 的 base += 0 永不推进 —— 对"见门即批"的
+                // 自动化/GUI 用户是活锁(review finding #1,已运行时实测)。配置期拦下。
+                if *max == 0 {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': loop.max 必须 ≥ 1(0 会让 body 永不执行且重试原地打转)",
                         step.id
                     )));
                 }
@@ -239,9 +303,28 @@ impl Manifest {
                         step.id
                     )));
                 }
+                // allow_residual: critical 无意义 —— 收敛即放行,而 critical 残留本就是
+                // "严重缺陷未修"，拒绝在 validate 阶段拦下配置错误。
+                if matches!(allow_residual, Some(crate::context::Severity::Critical)) {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': allow_residual 不能为 critical(残留 critical 无意义,收敛即放行严重缺陷)",
+                        step.id
+                    )));
+                }
                 for s in body {
                     Self::validate_step(s)?;
                 }
+                Ok(())
+            }
+            StepKind::Acp { agent, command, prompt } => {
+                Self::require_non_empty(&step.id, "acp.agent", agent, Some("显示用名称"))?;
+                Self::require_non_empty(
+                    &step.id,
+                    "acp.command",
+                    command,
+                    Some("启动外部 agent 的完整命令"),
+                )?;
+                Self::require_non_empty(&step.id, "acp.prompt", prompt, None)?;
                 Ok(())
             }
             _ => Ok(()),
@@ -289,9 +372,63 @@ mod tests {
     }
 
     #[test]
+    fn budget_usd_parses_and_validates() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nsteps: []\n";
+        let m = Manifest::parse(y).unwrap();
+        assert_eq!(m.budget_usd, Some(5.0));
+        assert!(m.validate().is_ok());
+    }
+
+    #[test]
+    fn budget_usd_rejects_non_positive() {
+        for bad in &[0.0_f64, -1.5, f64::INFINITY, f64::NAN] {
+            let y = format!("version: 1\nname: t\ntarget: /tmp\nbudget_usd: {bad}\nsteps: []\n");
+            let parsed = Manifest::parse(&y);
+            // NaN/inf 在 YAML 数字解析可能直接失败,也可能 parse 成 f64 特殊值;两条路径都不该被
+            // 当成有效预算放过去。所以这里允许 parse 失败,也接受 validate 拒绝。
+            if let Ok(m) = parsed {
+                assert!(
+                    m.validate().is_err(),
+                    "budget_usd={bad} 应被拒绝(parse 成功)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn budget_usd_absent_not_serialized() {
+        let m = Manifest::parse("version: 1\nname: t\ntarget: /tmp\nsteps: []\n").unwrap();
+        let y = serde_yml::to_string(&m).unwrap();
+        assert!(!y.contains("budget_usd"), "无 budget 时不应序列化:\n{y}");
+    }
+
+    #[test]
     fn worktree_false_not_serialized() {
         let m = Manifest::parse("version: 1\nname: t\ntarget: /tmp\nsteps: []\n").unwrap();
         let y = serde_yml::to_string(&m).unwrap();
         assert!(!y.contains("worktree"), "关闭时不应序列化 worktree:\n{y}");
+    }
+
+    #[test]
+    fn acp_parses_minimal_fields() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: ask\n    kind: acp\n    agent: \"gemini\"\n    command: \"gemini --acp\"\n    prompt: \"hi\"\n";
+        let m = Manifest::parse(y).unwrap();
+        assert!(m.validate().is_ok());
+        match &m.steps[0].kind {
+            StepKind::Acp { agent, command, prompt } => {
+                assert_eq!(agent, "gemini");
+                assert_eq!(command, "gemini --acp");
+                assert_eq!(prompt, "hi");
+            }
+            other => panic!("expected Acp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn acp_validate_rejects_empty_command() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: ask\n    kind: acp\n    agent: \"gemini\"\n    command: \"\"\n    prompt: \"hi\"\n";
+        let m = Manifest::parse(y).unwrap();
+        let err = m.validate().unwrap_err();
+        assert!(err.to_string().contains("command"), "err = {err}");
     }
 }

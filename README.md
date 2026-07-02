@@ -30,7 +30,11 @@ cargo test                   # ~100 tests
 Try the full flow with **no API calls** using the bundled stub binaries — this is exactly what the GIF above records:
 
 ```bash
-mkdir -p /tmp/ap-demo/repo && (cd /tmp/ap-demo/repo && git init -q)
+# the empty commit gives the repo a resolvable `main` ref — review-mr's base-ref
+# check (fail-loud by design) needs at least one commit to diff against.
+# `-b main` pins the branch name: demo-task.yaml reviews against `main`, and on
+# machines where `init.defaultBranch` is unset git would create `master` instead.
+mkdir -p /tmp/ap-demo/repo && (cd /tmp/ap-demo/repo && git init -q -b main && git -c user.name=demo -c user.email=demo@example.com commit --allow-empty -q -m init)
 AGENTPIPE_CLAUDE_BIN=$PWD/demo/stub-claude.sh \
 AGENTPIPE_CODEX_BIN=$PWD/demo/stub-codex.sh \
 AGENTPIPE_HOME=/tmp/ap-demo \
@@ -80,16 +84,18 @@ steps:
         prompt: "Fix Codex's findings on {{mr.artifact}} and push.\n\n{{review.findings}}"
 ```
 
-Data flows between steps by explicit interpolation — `{{mr.artifact}}`, `{{review.findings}}`, `{{review.verdict}}`.
+Data flows between steps by explicit interpolation — `{{mr.artifact}}`, `{{review.findings}}`, `{{review.verdict}}`, `{{review.history}}` (that step's findings from prior rounds, so the fixer doesn't ping-pong on feedback it already addressed).
+
+Convergence is checked right after the loop's last `codex` step finishes each round, not at the end of the body — once Codex reports clean, any remaining steps (like `fix`) are skipped instead of running a pointless empty-findings pass.
 
 ## Step types
 
 | kind   | what it does |
 |--------|--------------|
 | claude | Run Claude once on a prompt (optionally referencing a skill). Runs at the CLI's highest permission (bypassPermissions). |
-| codex  | Codex as a reviewer: `review-doc` / `review-mr` (structured `verdict` + `findings`) / `ask`. |
+| codex  | Codex as a reviewer: `review-doc` / `review-mr` (structured `verdict` + `findings`) / `ask`. Optional `vet: true` adds a read-only self-challenge pass — findings Codex can't back up with code evidence get dropped before they reach the fixer (verification itself failing falls back to the original findings). |
 | human  | A human does something (often in their own Claude Code session); the engine waits for approval + an artifact. Can be pre-seeded with `value` to run headless. |
-| loop   | Wrap a body of sub-steps; `until: codex-clean` converges, or stop at `max`. |
+| loop   | Wrap a body of sub-steps; `until: codex-clean` converges. Exhausting `max` pauses at a decision gate (retry / skip / abort) — it never passes silently. Optional `allow_residual: minor\|major\|nit` also converges once every residual finding is at or below that severity. |
 
 Any `claude` / `codex` step can carry a **verify gate** (`verify: { by: codex | claude | command, ... }`) that re-checks whether the step met its goal and retries with feedback if not.
 
@@ -115,7 +121,7 @@ Every run is appended as NDJSON to `~/.agentpipe/runs/<run-id>.ndjson` (run-id i
 | Linux    | should work (unix paths; same code paths as macOS) | should work (untested) |
 | Windows  | compiles (unix-only `libc`/process-group code is `cfg`-gated, with fallbacks); untested | Tauri is cross-platform; untested |
 
-CI builds and tests on Linux + macOS and build-checks Windows. Reports of breakage on Linux/Windows are welcome.
+Verified locally on macOS via `cargo test --workspace` + `cargo clippy --workspace --all-targets -- -D warnings`. Reports of breakage on Linux/Windows are welcome.
 
 ## Adapting to other agents
 

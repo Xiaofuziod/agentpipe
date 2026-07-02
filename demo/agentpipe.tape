@@ -17,7 +17,7 @@ Hide
 Type "export PATH=$PWD/target/release:$PATH" Enter
 Type "export AGENTPIPE_CLAUDE_BIN=$PWD/demo/stub-claude.sh AGENTPIPE_CODEX_BIN=$PWD/demo/stub-codex.sh" Enter
 Type "export AGENTPIPE_HOME=/tmp/ap-demo" Enter
-Type "rm -f /tmp/ap-demo/codex.count; mkdir -p /tmp/ap-demo/repo; (cd /tmp/ap-demo/repo && git init -q)" Enter
+Type "rm -f /tmp/ap-demo/codex.count; mkdir -p /tmp/ap-demo/repo; (cd /tmp/ap-demo/repo && git init -q -b main && git -c user.name=demo -c user.email=demo@example.com commit --allow-empty -q -m init)" Enter
 Type "clear" Enter
 Show
 

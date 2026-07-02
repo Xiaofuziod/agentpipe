@@ -55,7 +55,10 @@ pub fn render_event(event: &Event) -> String {
         }
         Event::LoopMaxReached { loop_id, max, reason } => match reason {
             LoopEndReason::MaxReached => {
-                format!("  ⚠ {loop_id} hit max {max}, still not clean")
+                // P1 Retry 续号后 `max` 是累计已跑轮数,可能 > 配置的 max(2 次 Retry
+                // 后如 15 > 5)。"hit max {max}" 读起来像"配置的上限是 {max}",改成
+                // "ran {max} round(s)" 避免暗示配置值。
+                format!("  ⚠ {loop_id} ran {max} round(s), still not clean")
             }
             LoopEndReason::Aborted => format!("  ⏹ {loop_id} aborted at round {max}"),
             LoopEndReason::SubStepFailed => {
@@ -139,5 +142,18 @@ mod tests {
         assert_eq!(render_event(&e), "  ✓ l converged in 2 round(s), 3 residual finding(s) allowed");
         let e0 = Event::LoopConverged { loop_id: "l".into(), iterations: 2, residual: 0 };
         assert_eq!(render_event(&e0), "  ✓ l converged in 2 round(s)");
+    }
+
+    #[test]
+    fn renders_loop_max_reached_without_implying_configured_max() {
+        // 收尾自查(四维度「字面 vs 语义」):P1 Retry 续号后 max 字段是累计已跑轮数,
+        // 可能 > manifest 配置的 max(如 Retry 一次后 10 > 配置的 5)。文案不能用
+        // "hit max {max}"(读起来像"配置上限是 {max}"),必须是中性的"跑了几轮"。
+        let e = Event::LoopMaxReached {
+            loop_id: "review-fix".into(),
+            max: 10,
+            reason: LoopEndReason::MaxReached,
+        };
+        assert_eq!(render_event(&e), "  ⚠ review-fix ran 10 round(s), still not clean");
     }
 }

@@ -601,14 +601,14 @@ impl Executor {
                         });
                         return Err(());
                     }
-                    if Some(i) == anchor && self.eval_until(until, body, allow_residual) {
+                    if Some(i) == anchor && self.eval_until(until, body, anchor, allow_residual) {
                         for skipped in &body[i + 1..] {
                             self.emit_skipped_with(&skipped.id, "loop 已收敛,跳过");
                         }
                         let _ = self.events.send(Event::LoopConverged {
                             loop_id: loop_id.into(),
                             iterations: n,
-                            residual: self.residual_count(body),
+                            residual: self.residual_count(body, anchor),
                         });
                         return Ok(());
                     }
@@ -644,37 +644,34 @@ impl Executor {
     }
 
     /// 锚点 step 当前 items 数(LoopConverged.residual)。verdict-clean 收敛通常 0;
-    /// allow_residual 收敛(Task 3)时为遗留 finding 数。
-    fn residual_count(&self, body: &[Step]) -> u32 {
-        body.iter()
-            .rev()
-            .find(|s| matches!(s.kind, StepKind::Codex { .. }))
-            .and_then(|s| self.ctx.get(&s.id))
+    /// allow_residual 收敛(Task 3)时为遗留 finding 数。`anchor` 由 run_loop 顶部算好
+    /// 传入(收尾自查收口:此前这里自己重新 rfind 一遍,与 run_loop / eval_until 各算
+    /// 一次「body 最后一个 codex step」,三处同一份逻辑分散易漂移)。
+    fn residual_count(&self, body: &[Step], anchor: Option<usize>) -> u32 {
+        anchor
+            .and_then(|i| self.ctx.get(&body[i].id))
             .map(|o| o.items.len() as u32)
             .unwrap_or(0)
     }
 
     /// 收敛判定。verdict clean 恒收敛;配置 allow_residual 时,findings 全部 ≤ 阈值
     /// 也算收敛(带残留)。items 空 + 非 clean 是解析 fallback 的形状 —— fail-closed
-    /// 不收敛(放行等于把"无法解析 Codex 输出"判过)。
-    fn eval_until(&self, until: &str, body: &[Step], allow_residual: Option<Severity>) -> bool {
+    /// 不收敛(放行等于把"无法解析 Codex 输出"判过)。`anchor` 同 residual_count,由
+    /// run_loop 传入,不在此重复定位。
+    fn eval_until(&self, until: &str, body: &[Step], anchor: Option<usize>, allow_residual: Option<Severity>) -> bool {
         if until != "codex-clean" {
             return false;
         }
-        for sub in body.iter().rev() {
-            if matches!(sub.kind, StepKind::Codex { .. }) {
-                if let Some(out) = self.ctx.get(&sub.id) {
-                    if matches!(out.verdict, Some(Verdict::Clean)) {
-                        return true;
-                    }
-                    if let Some(t) = allow_residual {
-                        return !out.items.is_empty() && out.items.iter().all(|i| i.severity <= t);
-                    }
-                    return false;
-                }
-            }
+        let Some(out) = anchor.and_then(|i| self.ctx.get(&body[i].id)) else {
+            return false; // 没找到 codex step,或该 step 尚未跑过 → fail-closed 不收敛
+        };
+        if matches!(out.verdict, Some(Verdict::Clean)) {
+            return true;
         }
-        false // 没找到 codex step → fail-closed 不收敛
+        if let Some(t) = allow_residual {
+            return !out.items.is_empty() && out.items.iter().all(|i| i.severity <= t);
+        }
+        false
     }
 
     // (helper 见文件末 emit_answer_preview)

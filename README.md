@@ -30,7 +30,9 @@ cargo test                   # ~100 tests
 Try the full flow with **no API calls** using the bundled stub binaries — this is exactly what the GIF above records:
 
 ```bash
-mkdir -p /tmp/ap-demo/repo && (cd /tmp/ap-demo/repo && git init -q)
+# the empty commit gives the repo a resolvable `main` ref — review-mr's base-ref
+# check (fail-loud by design) needs at least one commit to diff against.
+mkdir -p /tmp/ap-demo/repo && (cd /tmp/ap-demo/repo && git init -q && git -c user.name=demo -c user.email=demo@example.com commit --allow-empty -q -m init)
 AGENTPIPE_CLAUDE_BIN=$PWD/demo/stub-claude.sh \
 AGENTPIPE_CODEX_BIN=$PWD/demo/stub-codex.sh \
 AGENTPIPE_HOME=/tmp/ap-demo \

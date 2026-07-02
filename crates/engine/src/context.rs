@@ -9,11 +9,39 @@ pub enum Verdict {
     ChangesRequested,
 }
 
+/// finding 严重度。声明序 = 严重度升序,derive Ord 后 `sev <= threshold`
+/// 自然表达"不严于阈值"(allow_residual 收敛判定用)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Nit,
+    Minor,
+    Major,
+    Critical,
+}
+
+impl Severity {
+    /// 未知字符串 → Critical(fail-closed:阻塞收敛)。REVIEW_SCHEMA enum 已约束
+    /// 真实 codex 只能输出四值;这里兜 stub / 旧二进制 / 手写 fixture 的任意串。
+    pub fn parse_lossy(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "nit" => Self::Nit,
+            "minor" => Self::Minor,
+            "major" => Self::Major,
+            "critical" => Self::Critical,
+            _ => Self::Critical,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct StepOutput {
     pub artifact: Option<String>,
     pub findings: Option<String>,
     pub verdict: Option<Verdict>,
+    /// 结构化 findings(severity 收敛判定用)。只有 codex step 成功解析时非空;
+    /// 解析 fallback / claude / human step 恒空。内部类型,不进 NDJSON。
+    pub items: Vec<crate::protocol::FindingItem>,
 }
 
 impl StepOutput {

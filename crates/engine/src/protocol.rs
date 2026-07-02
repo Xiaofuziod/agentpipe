@@ -76,7 +76,14 @@ pub enum Event {
     /// 隔离 worktree 创建失败:Run fail-closed 终止(不退回 target 原地跑)。
     WorktreeFailed { error: String },
     LoopIteration { loop_id: String, iteration: u32 },
-    LoopConverged { loop_id: String, iterations: u32 },
+    LoopConverged {
+        loop_id: String,
+        iterations: u32,
+        /// 带残留收敛(allow_residual)时的遗留 finding 数;verdict-clean 收敛通常为 0。
+        /// serde default 兼容老审计日志(缺字段 → 0,回放语义不变)。
+        #[serde(default)]
+        residual: u32,
+    },
     /// Loop 终止事件。reason 区分三种结束原因:自然 max(原义)、外部 Abort、sub-step 失败
     /// 透传 —— UI/CLI 渲染应按 reason 出不同文案,而非旧版统一的「hit max,still not clean」
     /// 误导文本(review §A finding #15)。`#[serde(default)]` 让老审计日志解析回退 MaxReached,
@@ -124,11 +131,24 @@ pub enum Command {
     Abort,
 }
 
+/// 单条结构化 finding(engine 内部类型,不进 NDJSON 事件协议)。
+/// severity 用 context::Severity(未知串在 codex runner 侧已 parse_lossy 归一)。
+#[derive(Debug, Clone)]
+pub struct FindingItem {
+    pub severity: crate::context::Severity,
+    pub file: String,
+    pub line: i64,
+    pub summary: String,
+    pub suggestion: String,
+}
+
 /// 供 codex runner 复用的结果类型
 #[derive(Debug, Clone)]
 pub struct ReviewResult {
     pub verdict: Verdict,
     pub findings: String,
+    /// 结构化 findings(severity 收敛判定用)。见 FindingItem。
+    pub items: Vec<FindingItem>,
     /// codex 本次 review 的成本/轮次/耗时。codex CLI 当前不输出 token usage,所以
     /// 实际填 None;字段先就位让 verify_once 把 verifier cost 上报给 budget,等
     /// codex CLI 升级输出 metrics 后直接填,无需再改 schema。

@@ -1,9 +1,9 @@
 use super::run_command;
 use crate::control::Control;
-use crate::context::Verdict;
+use crate::context::{Severity, Verdict};
 use crate::error::EngineError;
 use crate::manifest::CodexAction;
-use crate::protocol::ReviewResult;
+use crate::protocol::{FindingItem, ReviewResult};
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::Once;
@@ -317,21 +317,33 @@ fn render_finding(f: &RawFinding) -> String {
     }
 }
 
-/// RawReview → ReviewResult(verdict 归一 + findings 扁平化)。解析两路共用,避免漂移。
-/// metrics 始终 None:codex CLI 不在 stdout 输出 token usage,等升级后填。
+/// RawReview → ReviewResult(verdict 归一 + findings 扁平化 + items 结构化)。
+/// 解析两路共用,避免漂移。metrics 始终 None:codex CLI 不在 stdout 输出 token
+/// usage,等升级后填。items 的 suggestion 存原始串(渲染归一只在 render_finding)。
 fn raw_to_result(raw: RawReview) -> ReviewResult {
     let verdict = if raw.verdict == "clean" {
         Verdict::Clean
     } else {
         Verdict::ChangesRequested
     };
+    let items = raw
+        .findings
+        .iter()
+        .map(|f| FindingItem {
+            severity: Severity::parse_lossy(&f.severity),
+            file: f.file.clone(),
+            line: f.line,
+            summary: f.summary.clone(),
+            suggestion: f.suggestion.clone(),
+        })
+        .collect();
     let findings = raw
         .findings
         .iter()
         .map(render_finding)
         .collect::<Vec<_>>()
         .join("\n");
-    ReviewResult { verdict, findings, metrics: None }
+    ReviewResult { verdict, findings, items, metrics: None }
 }
 
 /// 从 codex stdout 抓最后一条能解析成 schema 的 JSON 行。无则 None(交给 -o fallback)。
@@ -359,20 +371,19 @@ fn write_schema() -> Result<String, EngineError> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// 读 -o 文件解析;不可读 / 不可解析 → None(caller 决定 fallback 语义)。
+fn parse_review_file(out_file: &Path) -> Option<ReviewResult> {
+    let content = std::fs::read_to_string(out_file).ok()?;
+    serde_json::from_str::<RawReview>(content.trim()).ok().map(raw_to_result)
+}
+
 fn parse_review(out_file: &Path) -> ReviewResult {
-    let fallback = ReviewResult {
+    parse_review_file(out_file).unwrap_or_else(|| ReviewResult {
         verdict: Verdict::ChangesRequested,
         findings: "(无法解析 Codex 输出,按需修改处理)".into(),
+        items: vec![],
         metrics: None,
-    };
-    let content = match std::fs::read_to_string(out_file) {
-        Ok(c) => c,
-        Err(_) => return fallback,
-    };
-    match serde_json::from_str::<RawReview>(content.trim()) {
-        Ok(raw) => raw_to_result(raw),
-        Err(_) => fallback,
-    }
+    })
 }
 
 // 必须是严格 JSON Schema:OpenAI 结构化输出要求每个 object 带 additionalProperties:false
@@ -393,8 +404,47 @@ const REVIEW_SCHEMA: &str = r#"{
       "type":"object","additionalProperties":false,
       "required":["severity","file","line","summary","suggestion"],
       "properties":{
-        "severity":{"type":"string"},"file":{"type":"string"},
+        "severity":{"type":"string","enum":["critical","major","minor","nit"]},"file":{"type":"string"},
         "line":{"type":"integer"},"summary":{"type":"string"},
         "suggestion":{"type":"string"}}}}
   }
 }"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::Severity;
+
+    fn raw(verdict: &str, sev: &str) -> RawReview {
+        RawReview {
+            verdict: verdict.into(),
+            findings: vec![RawFinding {
+                severity: sev.into(), file: "a.rs".into(), line: 1,
+                summary: "s".into(), suggestion: "do x".into(),
+            }],
+        }
+    }
+
+    #[test]
+    fn items_map_known_severities() {
+        for (s, want) in [("nit", Severity::Nit), ("minor", Severity::Minor),
+                          ("MAJOR", Severity::Major), ("critical", Severity::Critical)] {
+            let r = raw_to_result(raw("changes_requested", s));
+            assert_eq!(r.items[0].severity, want, "severity 串 {s}");
+        }
+    }
+
+    #[test]
+    fn unknown_severity_fail_closed_critical() {
+        // stub / 旧二进制的 "high" 一类未知串必须按最严处理,不给 allow_residual 放行机会
+        let r = raw_to_result(raw("changes_requested", "high"));
+        assert_eq!(r.items[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn severity_ord_matches_threshold_semantics() {
+        assert!(Severity::Nit < Severity::Minor);
+        assert!(Severity::Minor < Severity::Major);
+        assert!(Severity::Major < Severity::Critical);
+    }
+}

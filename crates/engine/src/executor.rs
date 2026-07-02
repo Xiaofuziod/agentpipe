@@ -197,6 +197,7 @@ impl Executor {
                             self.ctx.record(&step.id, StepOutput {
                                 findings: Some(out.findings),
                                 verdict: Some(out.verdict),
+                                items: out.items,
                                 ..Default::default()
                             });
                             self.finish(&step.id, summary, out.metrics);
@@ -585,9 +586,12 @@ impl Executor {
                 }
             }
             if self.eval_until(until, body) {
+                // residual 占位 0(Task 2 换真实 residual_count;allow_residual 收敛
+                // 落地前,verdict-clean 收敛的残留 finding 数恒为 0)。
                 let _ = self.events.send(Event::LoopConverged {
                     loop_id: loop_id.into(),
                     iterations: n,
+                    residual: 0,
                 });
                 return Ok(());
             }

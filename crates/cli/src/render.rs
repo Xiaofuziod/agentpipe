@@ -46,7 +46,8 @@ pub fn render_event(event: &Event) -> String {
         Event::WorktreeReady { path, branch } => format!("  ⑂ worktree: {branch} @ {path}"),
         Event::WorktreeFailed { error } => format!("  ✗ worktree failed: {error}"),
         Event::LoopIteration { loop_id, iteration } => format!("  ↻ {loop_id} round {iteration}"),
-        Event::LoopConverged { loop_id, iterations } => format!("  ✓ {loop_id} converged in {iterations} round(s)"),
+        // residual 渲染留给 Task 6(本 Task 只补字段保编译)。
+        Event::LoopConverged { loop_id, iterations, .. } => format!("  ✓ {loop_id} converged in {iterations} round(s)"),
         Event::LoopMaxReached { loop_id, max, reason } => match reason {
             LoopEndReason::MaxReached => {
                 format!("  ⚠ {loop_id} hit max {max}, still not clean")

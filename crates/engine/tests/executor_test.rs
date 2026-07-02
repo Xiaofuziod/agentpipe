@@ -161,7 +161,9 @@ steps:
 "#;
     let m = Manifest::parse(yaml).unwrap();
     let (etx, erx) = mpsc::channel();
-    let (_c, crx) = mpsc::channel::<Command>();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    // P1:自然耗尽 max 后 run_loop 过决策门阻塞等命令,预灌 Skip 收尾(否则 recv 永久挂死)。
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
     let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
     ex.run();
     let events: Vec<_> = erx.try_iter().collect();
@@ -823,4 +825,145 @@ steps:
         )
     });
     assert!(!unwanted, "base 经 trim 后应正常 review,不该 fail-loud: {events:?}");
+}
+
+/// P1:自然耗尽 max → 决策门;预灌 Skip → StepFinished{Skipped} + run Success。
+#[test]
+fn loop_max_gates_and_skip_continues() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 2
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: HEAD
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    let status = ex.run();
+    assert_eq!(status, RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(events.iter().any(|e| matches!(e,
+        Event::StepAwaitingGate { step_id, gate_kind: agentpipe_engine::protocol::GateKind::Decision, .. }
+            if step_id == "fixloop")),
+        "耗尽 max 必须弹决策门");
+    assert!(events.iter().any(|e| matches!(e,
+        Event::StepFinished { step_id, status: StepStatus::Skipped, .. } if step_id == "fixloop")),
+        "Skip 必须留审计痕");
+}
+
+/// P1:预灌 Abort → RunStatus::Aborted。
+#[test]
+fn loop_max_gate_abort_aborts_run() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 2
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: HEAD
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::Abort).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Aborted);
+    let _ = erx; // 事件断言可省:状态即契约
+}
+
+/// P1:Approve(Retry)→ 再跑 max 轮且 iteration 续号(1,2,3,4),第二次门 Skip 收尾。
+#[test]
+fn loop_max_gate_retry_continues_iteration_numbering() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 2
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: HEAD
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx, crx) = mpsc::channel::<Command>();
+    ctx.send(Command::ApproveGate { step_id: "fixloop".into(), artifact: None }).unwrap();
+    ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let iters: Vec<u32> = erx.try_iter().filter_map(|e| match e {
+        Event::LoopIteration { iteration, .. } => Some(iteration),
+        _ => None,
+    }).collect();
+    assert_eq!(iters, vec![1, 2, 3, 4], "Retry 后编号必须续 3,4 而非重开 1,2");
+}
+
+/// P6:review 首轮即 clean → fix 被跳过(Skipped 且非 Started),LoopConverged 在场。
+#[test]
+fn loop_short_circuits_body_after_anchor_clean() {
+    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _e = EnvGuard::set("STUB_VERDICT", "clean");
+    let yaml = r#"
+version: 1
+name: t
+target: .
+mode: auto
+steps:
+  - id: fixloop
+    kind: loop
+    until: codex-clean
+    max: 3
+    body:
+      - id: rev
+        kind: codex
+        action: review-mr
+        base: HEAD
+      - id: fix
+        kind: claude
+        prompt: "修 {{rev.findings}}"
+"#;
+    let m = Manifest::parse(yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (_c, crx) = mpsc::channel::<Command>();
+    let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
+    assert_eq!(ex.run(), RunStatus::Success);
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(!events.iter().any(|e| matches!(e,
+        Event::StepStarted { step_id, .. } if step_id == "fix")),
+        "收敛轮 fix 不得启动(P6 主修:不再空烧一次)");
+    assert!(events.iter().any(|e| matches!(e,
+        Event::StepFinished { step_id, status: StepStatus::Skipped, .. } if step_id == "fix")));
+    assert!(events.iter().any(|e| matches!(e, Event::LoopConverged { iterations: 1, .. })));
 }

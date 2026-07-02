@@ -557,51 +557,87 @@ impl Executor {
     }
 
     fn run_loop(&mut self, loop_id: &str, until: &str, max: u32, body: &[Step], gated: bool) -> Result<(), ()> {
-        for n in 1..=max {
-            if self.control.is_aborted() {
-                // 控制中止:emit LoopMaxReached{reason: Aborted}让 UI 渲染区分于「自然耗
-                // 尽 max」(review §A finding #15)。前 PR 共用 MaxReached 让用户看到
-                // 「hit max 0, still not clean」语义噪音 — reason 明确分流。
-                let _ = self.events.send(Event::LoopMaxReached {
-                    loop_id: loop_id.into(),
-                    max: n.saturating_sub(1),
-                    reason: LoopEndReason::Aborted,
-                });
-                return Err(());
-            }
-            let _ = self.events.send(Event::LoopIteration {
-                loop_id: loop_id.into(),
-                iteration: n,
-            });
-            for sub in body {
-                if self.run_step(sub, gated).is_err() {
-                    // sub-step 失败 Err 透传:reason=SubStepFailed,与控制中止 / 自然 max
-                    // 三态分明。UI/CLI 各自按 reason 出不同文案,不再「都说 hit max」。
+        // 锚点 = body 最后一个 codex step(until: codex-clean 的收敛信号源,validate 已保证存在)。
+        // 锚点跑完立即判收敛(P6):收敛则跳过其后 body step,不再空烧一轮 fix。
+        // 锚点之前的 codex step 不判 —— 那时锚点在 ctx 里的 verdict 是上一轮残留,读了是脏值。
+        let anchor = body.iter().rposition(|s| matches!(s.kind, StepKind::Codex { .. }));
+        let mut base = 0u32; // P1 Retry 续号 offset:人工再批一份 max 预算,round 编号不重开
+        loop {
+            for n in (base + 1)..=(base + max) {
+                if self.control.is_aborted() {
+                    // 控制中止:emit LoopMaxReached{reason: Aborted}让 UI 渲染区分于「自然耗
+                    // 尽 max」(review §A finding #15)。前 PR 共用 MaxReached 让用户看到
+                    // 「hit max 0, still not clean」语义噪音 — reason 明确分流。
                     let _ = self.events.send(Event::LoopMaxReached {
                         loop_id: loop_id.into(),
-                        max: n,
-                        reason: LoopEndReason::SubStepFailed,
+                        max: n.saturating_sub(1),
+                        reason: LoopEndReason::Aborted,
                     });
                     return Err(());
                 }
+                let _ = self.events.send(Event::LoopIteration { loop_id: loop_id.into(), iteration: n });
+                for (i, sub) in body.iter().enumerate() {
+                    if self.run_step(sub, gated).is_err() {
+                        // sub-step 失败 Err 透传:reason=SubStepFailed,与控制中止 / 自然 max
+                        // 三态分明。UI/CLI 各自按 reason 出不同文案,不再「都说 hit max」。
+                        let _ = self.events.send(Event::LoopMaxReached {
+                            loop_id: loop_id.into(),
+                            max: n,
+                            reason: LoopEndReason::SubStepFailed,
+                        });
+                        return Err(());
+                    }
+                    if Some(i) == anchor && self.eval_until(until, body) {
+                        for skipped in &body[i + 1..] {
+                            self.emit_skipped_with(&skipped.id, "loop 已收敛,跳过");
+                        }
+                        let _ = self.events.send(Event::LoopConverged {
+                            loop_id: loop_id.into(),
+                            iterations: n,
+                            residual: self.residual_count(body),
+                        });
+                        return Ok(());
+                    }
+                }
             }
-            if self.eval_until(until, body) {
-                // residual 占位 0(Task 2 换真实 residual_count;allow_residual 收敛
-                // 落地前,verdict-clean 收敛的残留 finding 数恒为 0)。
-                let _ = self.events.send(Event::LoopConverged {
-                    loop_id: loop_id.into(),
-                    iterations: n,
-                    residual: 0,
-                });
-                return Ok(());
+            // P1:自然耗尽 max —— fail-closed 过决策门,绝不静默继续(README 既有承诺落地)。
+            // 门 suggestion 附锚点末轮 findings,让人在门上直接看到"还剩什么没修"再决策。
+            let _ = self.events.send(Event::LoopMaxReached {
+                loop_id: loop_id.into(),
+                max: base + max,
+                reason: LoopEndReason::MaxReached,
+            });
+            let findings = anchor
+                .and_then(|i| self.ctx.get(&body[i].id))
+                .and_then(|o| o.findings.clone())
+                .unwrap_or_default();
+            let suggestion = format!(
+                "loop 跑满 {} 轮仍未收敛,选择 重试(再跑 {max} 轮)/ 跳过 / 中止\n{findings}",
+                base + max
+            );
+            match self.decision_gate(loop_id, suggestion) {
+                StepDecision::Retry => {
+                    base += max;
+                    continue;
+                }
+                StepDecision::Skip => {
+                    self.emit_skipped(loop_id);
+                    return Ok(());
+                }
+                StepDecision::Abort => return Err(()),
             }
         }
-        let _ = self.events.send(Event::LoopMaxReached {
-            loop_id: loop_id.into(),
-            max,
-            reason: LoopEndReason::MaxReached,
-        });
-        Ok(())
+    }
+
+    /// 锚点 step 当前 items 数(LoopConverged.residual)。verdict-clean 收敛通常 0;
+    /// allow_residual 收敛(Task 3)时为遗留 finding 数。
+    fn residual_count(&self, body: &[Step]) -> u32 {
+        body.iter()
+            .rev()
+            .find(|s| matches!(s.kind, StepKind::Codex { .. }))
+            .and_then(|s| self.ctx.get(&s.id))
+            .map(|o| o.items.len() as u32)
+            .unwrap_or(0)
     }
 
     /// 目前只支持 codex-clean:找 body 里最后一个 codex step 的 verdict。
@@ -717,10 +753,14 @@ impl Executor {
     }
 
     fn emit_skipped(&self, step_id: &str) {
+        self.emit_skipped_with(step_id, "skipped");
+    }
+
+    fn emit_skipped_with(&self, step_id: &str, summary: &str) {
         let _ = self.events.send(Event::StepFinished {
             step_id: step_id.to_string(),
             status: StepStatus::Skipped,
-            summary: "skipped".into(),
+            summary: summary.into(),
             metrics: None,
         });
     }

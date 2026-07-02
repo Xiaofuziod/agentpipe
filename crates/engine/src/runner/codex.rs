@@ -5,9 +5,9 @@ use crate::error::EngineError;
 use crate::manifest::CodexAction;
 use crate::protocol::{FindingItem, ReviewResult};
 use serde::Deserialize;
-use std::path::Path;
-use std::sync::Once;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Once, OnceLock};
 
 static OUT_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -98,10 +98,7 @@ impl CodexRunner {
             );
         });
 
-        let seq = OUT_SEQ.fetch_add(1, Ordering::Relaxed);
-        let out_file = std::env::temp_dir()
-            .join(format!("agentpipe-codex-{}-{}.json", std::process::id(), seq));
-        let out_str = out_file.to_string_lossy().to_string();
+        let (out_file, out_str) = out_file_for("codex");
         let schema = write_schema()?;
 
         // 全部走通用 `codex exec` + 严格 --output-schema 拿结构化 verdict。
@@ -187,26 +184,9 @@ impl CodexRunner {
             ),
         };
 
-        // codex exec 输出非 NDJSON 协议,原始行直接作无轮次进度上报(round=None)。
-        let mut raw_sink = |line: &str| on_progress(line, None);
-        let started = std::time::Instant::now();
-        let (stdout, success) = run_command(
-            &self.bin,
-            &args,
-            cwd,
-            stdin.as_deref(),
-            Some(self.timeout_secs),
-            control,
-            &mut raw_sink,
-        )?;
-        // 超时:run_command 到点 killpg 返回 success=false,用墙钟区分超时与普通非零退出。
-        // fail-closed 为 Err → executor 走 step 失败决策门(重试/跳过/中止),不把超时喂回 loop 重挂。
-        if !success && started.elapsed() >= std::time::Duration::from_secs(self.timeout_secs) {
-            return Err(EngineError::Cli(format!(
-                "Codex 审查超时(>{}s),已中止",
-                self.timeout_secs
-            )));
-        }
+        // 非超时的非零退出不在此拦截:落到下方解析 fallback(ChangesRequested 兜底),
+        // 与 vet_pass 的 fail-closed Err 语义有意不同(那边替换首轮结果,必须可判别失败)。
+        let (stdout, _success) = self.run_codex(&args, stdin.as_deref(), "审查", control, on_progress, cwd)?;
         // 真实 codex(v0.139.0)把最终结构化结果打到 stdout、不写 -o(--output-last-message)文件。
         // 故 stdout 优先:取最后一条能解析成 schema 的 JSON 行;读 -o 文件作 fallback
         // (stub / 旧 codex 路径,parse_review 自带"无法解析"兜底)。
@@ -241,10 +221,7 @@ impl CodexRunner {
         on_progress: &mut dyn FnMut(&str, Option<u32>),
         cwd: &Path,
     ) -> Result<ReviewResult, EngineError> {
-        let seq = OUT_SEQ.fetch_add(1, Ordering::Relaxed);
-        let out_file = std::env::temp_dir()
-            .join(format!("agentpipe-codex-vet-{}-{}.json", std::process::id(), seq));
-        let out_str = out_file.to_string_lossy().to_string();
+        let (out_file, out_str) = out_file_for("codex-vet");
         let schema = write_schema()?;
         let prompt = format!(
             "以下是你刚对当前工作区给出的 code review findings。逐条重新到代码里核实:\
@@ -258,14 +235,10 @@ impl CodexRunner {
             "-o".into(), out_str,
             prompt,
         ];
-        let mut raw_sink = |line: &str| on_progress(line, None);
-        let started = std::time::Instant::now();
-        let (stdout, success) = run_command(
-            &self.bin, &args, cwd, None, Some(self.timeout_secs), control, &mut raw_sink,
-        )?;
-        if !success && started.elapsed() >= std::time::Duration::from_secs(self.timeout_secs) {
-            return Err(EngineError::Cli(format!("Codex 核验超时(>{}s),已中止", self.timeout_secs)));
-        }
+        let (stdout, success) = self.run_codex(&args, None, "核验", control, on_progress, cwd)?;
+        // vet 与 review 主路径的失败语义有意不同:核验的任何失败(非零退出 / 不可解析)
+        // 都必须是可判别的 Err,让 caller 保留首轮结果;绝不能走"无法解析"占位符 fallback
+        // 抹掉真实 findings。
         if !success {
             return Err(EngineError::Cli("Codex 核验进程非零退出".into()));
         }
@@ -273,6 +246,55 @@ impl CodexRunner {
             .or_else(|| parse_review_file(&out_file))
             .ok_or_else(|| EngineError::Cli("Codex 核验输出不可解析".into()))
     }
+
+    /// 跑一次 codex exec 并做超时归类:run_command 到点 killpg 返回 success=false,
+    /// 用墙钟区分超时与普通非零退出,超时 fail-closed 为 Err(executor 走 step 失败
+    /// 决策门,不把超时喂回 loop 重挂)。非超时的非零退出原样返回,由调用方按各自
+    /// 语义分类(review 主路径 → 解析 fallback;vet → fail-closed Err 保留首轮)。
+    /// review 与 vet_pass 共用,防两处超时判定漂移。
+    #[allow(clippy::too_many_arguments)]
+    fn run_codex(
+        &self,
+        args: &[String],
+        stdin: Option<&str>,
+        label: &str,
+        control: Option<&Control>,
+        on_progress: &mut dyn FnMut(&str, Option<u32>),
+        cwd: &Path,
+    ) -> Result<(String, bool), EngineError> {
+        // codex exec 输出非 NDJSON 协议,原始行直接作无轮次进度上报(round=None)。
+        let mut raw_sink = |line: &str| on_progress(line, None);
+        let started = std::time::Instant::now();
+        let (stdout, success) = run_command(
+            &self.bin,
+            args,
+            cwd,
+            stdin,
+            Some(self.timeout_secs),
+            control,
+            &mut raw_sink,
+        )?;
+        if !success && started.elapsed() >= std::time::Duration::from_secs(self.timeout_secs) {
+            return Err(EngineError::Cli(format!(
+                "Codex {label}超时(>{}s),已中止",
+                self.timeout_secs
+            )));
+        }
+        Ok((stdout, success))
+    }
+}
+
+/// 结构化输出临时文件路径:进程 + 递增序号命名,并发调用互不撞名。
+/// 返回 (PathBuf, 字符串形式) 供 `-o` 参数与后续读取共用。
+fn out_file_for(tag: &str) -> (PathBuf, String) {
+    let seq = OUT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "agentpipe-{tag}-{}-{}.json",
+        std::process::id(),
+        seq
+    ));
+    let s = path.to_string_lossy().to_string();
+    (path, s)
 }
 
 /// 把 ReviewResult 用人读形式追发到 on_progress:一行 verdict 摘要 + 每条 finding
@@ -414,16 +436,29 @@ fn parse_review_stdout(stdout: &str) -> Option<ReviewResult> {
     None
 }
 
+/// schema 文件路径,进程内 memoize:REVIEW_SCHEMA 是编译期常量,旧实现每次调用都
+/// 重写一个新临时文件(vet 开启后每轮 ×2)纯属浪费且泄漏临时文件。
+static SCHEMA_PATH: OnceLock<String> = OnceLock::new();
+
 fn write_schema() -> Result<String, EngineError> {
-    // 按进程 + 序号命名,避免并发进程在同一固定路径上半写竞态。
-    let seq = OUT_SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "agentpipe-review-schema-{}-{}.json",
-        std::process::id(),
-        seq
+    if let Some(p) = SCHEMA_PATH.get() {
+        return Ok(p.clone());
+    }
+    // 只缓存成功路径:失败不缓存,瞬时磁盘错误不会毒化长驻进程(Tauri GUI 同进程
+    // 跑多个 run)的后续调用。写入走「唯一临时名 + 原子 rename」:同进程多线程并发
+    // 首写同一目标时,读方(codex 子进程)永远看到完整内容,不会读到半写文件;
+    // 目标名带 pid,跨进程仍互不干扰。
+    let pid = std::process::id();
+    let tmp = std::env::temp_dir().join(format!(
+        "agentpipe-review-schema-{pid}-{}.tmp",
+        OUT_SEQ.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, REVIEW_SCHEMA)?;
-    Ok(path.to_string_lossy().to_string())
+    std::fs::write(&tmp, REVIEW_SCHEMA)?;
+    let path = std::env::temp_dir().join(format!("agentpipe-review-schema-{pid}.json"));
+    std::fs::rename(&tmp, &path)?;
+    Ok(SCHEMA_PATH
+        .get_or_init(|| path.to_string_lossy().to_string())
+        .clone())
 }
 
 /// 读 -o 文件解析;不可读 / 不可解析 → None(caller 决定 fallback 语义)。

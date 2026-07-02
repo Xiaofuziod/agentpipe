@@ -1,32 +1,10 @@
+mod common;
+
 use agentpipe_engine::context::Verdict;
 use agentpipe_engine::manifest::CodexAction;
 use agentpipe_engine::runner::codex::CodexRunner;
+use common::{fixture, EnvGuard, ENV_LOCK};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-
-// STUB_VERDICT 是进程级 env,并行测试需串行化避免竞态。
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-/// env 变量的 RAII 清理:测试结束(含 panic 展开)自动 remove_var,避免残留污染
-/// 后续测试(与 executor_test.rs 同款 helper)。
-struct EnvGuard(&'static str);
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        std::env::set_var(key, value);
-        Self(key)
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        std::env::remove_var(self.0);
-    }
-}
-
-fn fixture(name: &str) -> String {
-    format!("{}/../../tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
-}
 
 fn stub() -> CodexRunner {
     CodexRunner::new(fixture("stub-codex.sh"))

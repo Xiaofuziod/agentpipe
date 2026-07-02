@@ -1,15 +1,12 @@
+mod common;
+
 use agentpipe_engine::control::Control;
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
 use agentpipe_engine::protocol::{Command, Event, LoopEndReason, RunStatus, StepStatus};
+use common::{fixture, EnvGuard, ENV_LOCK};
 use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
-
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn fixture(name: &str) -> String {
-    format!("{}/../../tests/fixtures/{}", env!("CARGO_MANIFEST_DIR"), name)
-}
+use std::sync::Arc;
 
 fn test_control() -> Arc<Control> {
     Arc::new(Control::default())
@@ -22,22 +19,18 @@ fn stub_bins() -> RunnerBins {
     }
 }
 
-/// RAII 守护:测试退出(正常或 panic)时自动 remove_var,防止跨测试污染。
-/// review-2 §C finding #10:之前 std::env::remove_var(...) 在 ex.run() 之后,
-/// panic 跳过清理 → 同进程后续抢到 ENV_LOCK 的测试看到泄漏的 env var。
-struct EnvGuard(&'static str);
-
-impl EnvGuard {
-    fn set(key: &'static str, value: &str) -> Self {
-        std::env::set_var(key, value);
-        Self(key)
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        std::env::remove_var(self.0);
-    }
+/// review-loop 测试清单:单 codex step(rev)+ 可选 allow_residual / 可选 fix claude
+/// step 的固定形状。10 个 P1/P2/P4/P6 loop 测试共用,改 loop step 形状只动这一处。
+fn loop_yaml(max: u32, allow_residual: Option<&str>, fix_prompt: Option<&str>) -> String {
+    let residual = allow_residual
+        .map(|s| format!("\n    allow_residual: {s}"))
+        .unwrap_or_default();
+    let fix = fix_prompt
+        .map(|p| format!("\n      - id: fix\n        kind: claude\n        prompt: \"{p}\""))
+        .unwrap_or_default();
+    format!(
+        "\nversion: 1\nname: t\ntarget: .\nmode: auto\nsteps:\n  - id: fixloop\n    kind: loop\n    until: codex-clean\n    max: {max}{residual}\n    body:\n      - id: rev\n        kind: codex\n        action: review-mr\n        base: HEAD{fix}\n"
+    )
 }
 
 #[test]
@@ -109,26 +102,8 @@ steps:
 fn loop_converges_when_codex_clean() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "clean");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 3
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: HEAD
-      - id: fix
-        kind: claude
-        prompt: "修 {{rev.findings}}"
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(3, None, Some("修 {{rev.findings}}"));
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (_c, crx) = mpsc::channel::<Command>();
     let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
@@ -143,23 +118,8 @@ steps:
 fn loop_hits_max_when_never_clean() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "changes_requested");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 2
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: HEAD
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(2, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel::<Command>();
     // P1:自然耗尽 max 后 run_loop 过决策门阻塞等命令,预灌 Skip 收尾(否则 recv 永久挂死)。
@@ -831,23 +791,8 @@ steps:
 fn loop_max_gates_and_skip_continues() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 2
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: HEAD
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(2, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel::<Command>();
     ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
@@ -869,23 +814,8 @@ steps:
 fn loop_max_gate_abort_aborts_run() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 2
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: HEAD
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(2, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel::<Command>();
     ctx.send(Command::Abort).unwrap();
@@ -899,23 +829,8 @@ steps:
 fn loop_max_gate_retry_continues_iteration_numbering() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 2
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: HEAD
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(2, None, None);
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel::<Command>();
     ctx.send(Command::ApproveGate { step_id: "fixloop".into(), artifact: None }).unwrap();
@@ -934,26 +849,8 @@ steps:
 fn loop_short_circuits_body_after_anchor_clean() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "clean");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 3
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: HEAD
-      - id: fix
-        kind: claude
-        prompt: "修 {{rev.findings}}"
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(3, None, Some("修 {{rev.findings}}"));
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (_c, crx) = mpsc::channel::<Command>();
     let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
@@ -973,24 +870,8 @@ fn loop_converges_with_residual_below_threshold() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
     let _s = EnvGuard::set("STUB_SEVERITY", "minor");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 3
-    allow_residual: minor
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: HEAD
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(3, Some("minor"), None);
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (_c, crx) = mpsc::channel::<Command>();
     let mut ex = Executor::new(m, stub_bins(), test_control(), etx, crx);
@@ -1007,24 +888,8 @@ fn loop_blocks_when_severity_above_threshold() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
     let _s = EnvGuard::set("STUB_SEVERITY", "high"); // 未知串,fail-closed → Critical
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 2
-    allow_residual: minor
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: HEAD
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(2, Some("minor"), None);
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel::<Command>();
     ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
@@ -1043,24 +908,8 @@ fn loop_never_converges_on_empty_items_with_changes_requested() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
     let _f = EnvGuard::set("STUB_FINDINGS", "[]");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 2
-    allow_residual: major
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: HEAD
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(2, Some("major"), None);
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel::<Command>();
     ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();
@@ -1079,26 +928,8 @@ steps:
 fn fix_prompt_receives_history_on_second_round() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _e = EnvGuard::set("STUB_VERDICT", "changes_requested");
-    let yaml = r#"
-version: 1
-name: t
-target: .
-mode: auto
-steps:
-  - id: fixloop
-    kind: loop
-    until: codex-clean
-    max: 2
-    body:
-      - id: rev
-        kind: codex
-        action: review-mr
-        base: HEAD
-      - id: fix
-        kind: claude
-        prompt: "H:{{rev.history}}"
-"#;
-    let m = Manifest::parse(yaml).unwrap();
+    let yaml = loop_yaml(2, None, Some("H:{{rev.history}}"));
+    let m = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (ctx, crx) = mpsc::channel::<Command>();
     ctx.send(Command::SkipStep { step_id: "fixloop".into() }).unwrap();

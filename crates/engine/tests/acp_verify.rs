@@ -57,6 +57,44 @@ fn acp_step_with_failing_verify_on_unmet_fail() {
 }
 
 #[test]
+fn acp_verify_unmet_retry_met_succeeds() {
+    let command = format!(
+        "env MOCK_ACP_SCENARIO=happy {}",
+        common::mock_acp_agent_bin()
+    );
+    let marker = std::env::temp_dir().join(format!(
+        "agentpipe-acp-retry-{}-marker",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&marker);
+    let verifier = format!(
+        "test -f {} || {{ touch {}; exit 1; }}",
+        marker.display(),
+        marker.display()
+    );
+    let yaml = format!(
+        "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: mock\n    command: \"{}\"\n    prompt: hi\n    verify:\n      by: command\n      command: \"{}\"\n      max_retries: 1\n",
+        command,
+        verifier
+    );
+
+    let (status, events) = run_manifest(&yaml);
+    let _ = std::fs::remove_file(&marker);
+
+    assert!(matches!(status, RunStatus::Success), "events: {events:?}");
+    assert!(
+        events.iter().any(|e| matches!(e,
+            Event::StepFinished { summary, .. } if summary.contains("已校验"))),
+        "StepFinished 应带 已校验 标记: {events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(e,
+            Event::StepProgress { line, .. } if line.contains("第 1 次重试"))),
+        "应记录第 1 次重试 progress: {events:?}"
+    );
+}
+
+#[test]
 fn acp_ask_policy_opens_permission_gate_and_approve_grants() {
     let command = format!(
         "env MOCK_ACP_SCENARIO=permission_probe {}",

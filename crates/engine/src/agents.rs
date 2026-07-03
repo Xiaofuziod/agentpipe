@@ -30,7 +30,7 @@ impl AgentRegistry {
     /// 文件不存在 = 空表(仅用内联 command 的用户零感知);存在但解析失败 =
     /// fail-loud(防"改了 registry 没生效"的静默漂移)。
     pub fn load_default() -> Result<Self, EngineError> {
-        Self::load_from(&crate::paths::base_dir().join("agents.toml"))
+        Self::load_from(&crate::paths::registry_path())
     }
 
     pub fn load_from(path: &Path) -> Result<Self, EngineError> {

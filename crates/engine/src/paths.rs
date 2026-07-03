@@ -10,3 +10,7 @@ pub fn base_dir() -> PathBuf {
         .unwrap_or_else(|_| ".".into());
     PathBuf::from(base).join(".agentpipe")
 }
+
+pub fn registry_path() -> PathBuf {
+    base_dir().join("agents.toml")
+}

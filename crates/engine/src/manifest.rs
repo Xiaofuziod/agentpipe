@@ -378,9 +378,9 @@ impl Manifest {
                 match command {
                     None if matches!(mode, ValidationMode::Run) => {
                         return Err(EngineError::Validation(format!(
-                            "step '{}': acp.command 缺失,且 agents registry 未命中 '{agent}'。两条出路:在 step 内联 command,或在 {}/agents.toml 增加 [agents.{agent}] command = \"...\"",
+                            "step '{}': acp.command 缺失,且 agents registry 未命中 '{agent}'。两条出路:在 step 内联 command,或在 {} 增加 [agents.{agent}] command = \"...\"",
                             step.id,
-                            crate::paths::base_dir().display()
+                            crate::paths::registry_path().display()
                         )))
                     }
                     None => {}
@@ -590,7 +590,11 @@ mod tests {
     fn acp_missing_command_error_mentions_registry() {
         let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: gemini\n    prompt: p\n";
         let err = Manifest::parse(y).unwrap().validate().unwrap_err().to_string();
-        assert!(err.contains("agents.toml"), "错误必须指向 registry 出路: {err}");
+        let registry_path = crate::paths::registry_path();
+        assert!(
+            err.contains(&registry_path.display().to_string()),
+            "错误必须指向 registry 出路: {err}"
+        );
         assert!(err.contains("gemini"), "错误必须点名 agent: {err}");
     }
 

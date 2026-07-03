@@ -18,6 +18,10 @@ pub struct Manifest {
     /// 见 docs/specs/2026-06-26-review-loop-budget-and-verdict-design.md §3.1。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_usd: Option<f64>,
+    /// 显式确认:budget_usd 与不计费 step(acp,metrics 恒 None)并存。缺省 false =
+    /// validate 拒绝该组合(fail-closed)。见 acp-hardening spec D1。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_unmetered: bool,
     pub steps: Vec<Step>,
 }
 
@@ -180,6 +184,16 @@ impl Manifest {
                 )));
             }
         }
+        if self.budget_usd.is_some() && !self.allow_unmetered {
+            let mut acp_ids = Vec::new();
+            Self::collect_acp_ids(&self.steps, &mut acp_ids);
+            if !acp_ids.is_empty() {
+                return Err(EngineError::Validation(format!(
+                    "budget_usd 已设置,但 step [{}] 是 acp 步骤,当前不上报 cost、不计入 budget(预算对其无效)。两条出路:去掉 budget_usd,或在 manifest 顶层显式声明 allow_unmetered: true",
+                    acp_ids.join(", ")
+                )));
+            }
+        }
         for step in &self.steps {
             Self::validate_step(step)?;
         }
@@ -330,6 +344,17 @@ impl Manifest {
             _ => Ok(()),
         }
     }
+
+    /// 递归收集 acp step id(含 loop body),供 D1 budget 硬拦报错点名。
+    fn collect_acp_ids(steps: &[Step], out: &mut Vec<String>) {
+        for s in steps {
+            match &s.kind {
+                StepKind::Acp { .. } => out.push(s.id.clone()),
+                StepKind::Loop { body, .. } => Self::collect_acp_ids(body, out),
+                _ => {}
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -400,6 +425,39 @@ mod tests {
         let m = Manifest::parse("version: 1\nname: t\ntarget: /tmp\nsteps: []\n").unwrap();
         let y = serde_yml::to_string(&m).unwrap();
         assert!(!y.contains("budget_usd"), "无 budget 时不应序列化:\n{y}");
+    }
+
+    #[test]
+    fn budget_with_acp_step_rejected_without_ack() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: gemini --acp\n    prompt: hi\n";
+        let err = Manifest::parse(y).unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("a"), "错误必须点名 acp step id: {err}");
+        assert!(err.contains("allow_unmetered"), "错误必须给出 ack 出路: {err}");
+    }
+
+    #[test]
+    fn budget_with_acp_step_allowed_with_ack() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nallow_unmetered: true\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: gemini --acp\n    prompt: hi\n";
+        assert!(Manifest::parse(y).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn budget_without_acp_unaffected() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nsteps:\n  - id: c\n    kind: claude\n    prompt: hi\n";
+        assert!(Manifest::parse(y).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn acp_without_budget_unaffected() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n";
+        assert!(Manifest::parse(y).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn budget_detects_acp_inside_loop_body() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nsteps:\n  - id: l\n    kind: loop\n    until: codex-clean\n    max: 2\n    body:\n      - id: r\n        kind: codex\n        action: review-mr\n        base: main\n      - id: inner\n        kind: acp\n        agent: g\n        command: c\n        prompt: p\n";
+        let err = Manifest::parse(y).unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("inner"), "loop body 内的 acp 必须被递归发现: {err}");
     }
 
     #[test]

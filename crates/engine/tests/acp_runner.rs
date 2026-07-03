@@ -3,44 +3,12 @@
 //! 用 `examples/mock_acp_agent.rs` 起 fixture binary,通过 stdio 跑真实 ACP wire 协议。
 //! 覆盖场景见 docs/specs/2026-06-25-acp-integration-design.md §8.2。
 
+mod common;
+
 use agentpipe_engine::control::Control;
 use agentpipe_engine::runner::acp::{AcpConfig, AcpOutcome, AcpRunner};
-use std::path::PathBuf;
-use std::process::Command;
-use std::sync::{Arc, Once};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-static BUILD_MOCK: Once = Once::new();
-
-fn ensure_mock_built() {
-    BUILD_MOCK.call_once(|| {
-        let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let status = Command::new("cargo")
-            .args(["build", "--quiet", "--example", "mock_acp_agent"])
-            .current_dir(manifest_dir)
-            .status()
-            .expect("spawn cargo build");
-        assert!(
-            status.success(),
-            "cargo build --example mock_acp_agent 失败"
-        );
-    });
-}
-
-/// 计算 mock binary 路径。target 默认 workspace 根的 `target/debug/examples/`。
-fn mock_command() -> String {
-    ensure_mock_built();
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // crates/engine -> agentpipe (workspace root)
-    let workspace_root = manifest_dir.parent().unwrap().parent().unwrap();
-    let bin = workspace_root.join("target/debug/examples/mock_acp_agent");
-    assert!(
-        bin.exists(),
-        "mock_acp_agent binary 不存在: {}",
-        bin.display()
-    );
-    bin.to_string_lossy().into_owned()
-}
 
 /// 跑一个 scenario,返回 (outcome 结果, 收到的 progress 行)。
 fn run_scenario_full(
@@ -49,7 +17,7 @@ fn run_scenario_full(
     timeout_secs: u64,
     control: Option<&Control>,
 ) -> (Result<AcpOutcome, String>, Vec<String>) {
-    let command = mock_command();
+    let command = common::mock_acp_agent_bin();
     let full_cmd = format!("env MOCK_ACP_SCENARIO={scenario} {command}");
     let runner = AcpRunner::with_timeout(
         AcpConfig {
@@ -80,7 +48,7 @@ fn run_scenario_perm(
     scenario: &str,
     cb: &mut dyn FnMut(&str) -> agentpipe_engine::runner::acp::PermissionDecision,
 ) -> Result<AcpOutcome, String> {
-    let command = mock_command();
+    let command = common::mock_acp_agent_bin();
     let full_cmd = format!("env MOCK_ACP_SCENARIO={scenario} {command}");
     let runner = AcpRunner::with_timeout(
         AcpConfig {
@@ -143,10 +111,10 @@ fn wrong_protocol_version_fails_loud() {
 fn abort_mid_stream_returns_promptly() {
     // long_stream agent 每秒发 1 chunk × 30 次 → 总跑 30s。
     // 主线程在 1.5s 时按 abort,期望 acp.run 在 ≤ 3s 总耗时内带 abort 错误返回。
-    // warm-up:cold start 时 BUILD_MOCK 还没跑过,首测会把 cargo build 算进 timer
-    // 造成 flaky;先 mock_command() 触发 ensure_mock_built,确保 mock binary 就绪
+    // warm-up:cold start 时 mock fixture 还没构建,首测会把 cargo build 算进 timer
+    // 造成 flaky;先 mock_acp_agent_bin() 触发构建,确保 mock binary 就绪
     // 后再开 timer(无副作用,Once 后续 call_once 跳过)。
-    ensure_mock_built();
+    let _ = common::mock_acp_agent_bin();
     let control = Arc::new(Control::default());
     let control_for_aborter = control.clone();
     let aborter = std::thread::spawn(move || {
@@ -172,7 +140,7 @@ fn abort_during_chatty_stream_returns_promptly() {
     // codex review P2 回归:fast_stream 每 10ms 一 chunk,比主线程 100ms 轮询间隔
     // 密得多,recv_timeout 永远命中 Ok 分支 —— 修复前 abort 只在 Timeout 分支检查,
     // 高频输出会把中止压到 agent 跑完(~30s)才响应;修复后循环头每轮检查,≤3s 返回。
-    ensure_mock_built();
+    let _ = common::mock_acp_agent_bin();
     let control = Arc::new(Control::default());
     let control_for_aborter = control.clone();
     let aborter = std::thread::spawn(move || {
@@ -228,7 +196,7 @@ fn abort_during_permission_grant_never_reports_ok() {
     use agentpipe_engine::runner::acp::{PermissionDecision, PermissionMode};
 
     let control = Arc::new(Control::default());
-    let command = mock_command();
+    let command = common::mock_acp_agent_bin();
     let full_cmd = format!("env MOCK_ACP_SCENARIO=permission_probe {command}");
     let runner = AcpRunner::with_timeout(
         AcpConfig {
@@ -304,7 +272,7 @@ fn permission_ask_abort_wins_even_if_agent_finishes_quickly() {
 fn timeout_mid_stream_returns_promptly() {
     // long_stream 每秒发 1 chunk × 30 次,timeout 设 1s → 应在 ~1-2s 内 timeout 错误返回。
     // 同 abort_mid_stream warm-up:防 cold start 把 cargo build 算进 timer。
-    ensure_mock_built();
+    let _ = common::mock_acp_agent_bin();
     let started = Instant::now();
     let (res, _progress) = run_scenario_full("long_stream", "go", 1, None);
     let elapsed = started.elapsed();

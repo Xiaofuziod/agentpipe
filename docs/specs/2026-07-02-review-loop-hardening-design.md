@@ -46,7 +46,7 @@
 
 **为什么不加 manifest 开关**:fail-open 是 bug 而非可选行为;README 与模板注释一直承诺 fail-closed,代码向承诺对齐,不需要向 bug 兼容。
 
-**headless 语义**:CLI 现有 stdin-EOF 策略是 fail-closed Skip(main.rs prompt_gate),MaxReached 门在无人值守时会被 Skip 并留下 `LoopMaxReached + StepFinished{Skipped}` 两条审计事件 —— 不阻塞、不静默,与 step 失败门的既有 EOF 语义一致,不另立规则。
+**headless 语义**(2026-07-03 修订,codex review P1):决策门(Decision:step 失败 / verify 未达标 / loop 耗尽 max)上的 stdin-EOF 一律 **Abort**(run 以非零 exit code 收尾),人显式敲 `s` 才是 Skip —— 区分"人主动跳过"与"无人在场"。原设计(EOF 一律 Skip)会让 headless/CI 场景下未收敛的 loop 以 exit 0 收尾,违反"gates progress on real exit codes"的核心契约。Step / Human 门维持 EOF-Skip(human 门 headless 的正路是预置 value,两者跳过不会把失败伪装成成功)。
 
 **不动的**:`LoopEndReason::Aborted / SubStepFailed` 两条路径行为不变(已经 Err 透传)。
 
@@ -142,7 +142,7 @@ converged =
 - ❌ 轮间 findings-diff 收敛(见 §3.2,V2)。
 - ❌ 多 reviewer 投票 / 并行 fan-out / Verdict 四维重构(两厂商个人工具,YAGNI,维持 2026-06-26 裁决)。
 - ❌ GUI composer 暴露 `allow_residual` / `vet` 新字段(手写 YAML 可用,composer 表单化留 follow-up;不阻塞本 spec)。
-- ❌ CLI stdin-EOF 门策略调整(现行 fail-closed Skip 覆盖所有门类,单独为 loop 门改语义反而制造不一致)。
+- ~~❌ CLI stdin-EOF 门策略调整~~(2026-07-03 撤销:codex review P1 证明原决策在 headless/CI 下把未收敛 loop 放行成 exit 0;决策门 EOF 已改为 Abort,见 §3.1 headless 语义修订)。
 
 ## 5. 范围摘要
 

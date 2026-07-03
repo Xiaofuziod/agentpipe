@@ -3,7 +3,7 @@ mod render;
 use agentpipe_engine::audit::{event_json_line, RunRecorder};
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
-use agentpipe_engine::protocol::{Command, Event};
+use agentpipe_engine::protocol::{Command, Event, GateKind};
 use clap::{Parser, Subcommand};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -134,8 +134,8 @@ fn cmd_run(task: &str, dry_run: bool, json: bool) {
         human!("{}", render::render_event(&event));
 
         match &event {
-            Event::StepAwaitingGate { step_id, expects_artifact, .. } => {
-                let cmd = prompt_gate(step_id, *expects_artifact);
+            Event::StepAwaitingGate { step_id, expects_artifact, gate_kind, .. } => {
+                let cmd = prompt_gate(step_id, *expects_artifact, gate_kind);
                 let _ = ctx.send(cmd);
             }
             Event::RunFinished { .. } => break,
@@ -150,7 +150,7 @@ fn cmd_run(task: &str, dry_run: bool, json: bool) {
 
 mod commands;
 
-fn prompt_gate(step_id: &str, expects_artifact: bool) -> Command {
+fn prompt_gate(step_id: &str, expects_artifact: bool, gate_kind: &GateKind) -> Command {
     let hint = if expects_artifact {
         "[y <artifact> / s skip]"
     } else {
@@ -160,15 +160,37 @@ fn prompt_gate(step_id: &str, expects_artifact: bool) -> Command {
     let _ = std::io::stderr().flush();
     let mut line = String::new();
     let n = std::io::stdin().lock().read_line(&mut line).unwrap_or(0);
-    // read_line 返回 0 = EOF(stdin 关闭 / 管道结束 / Ctrl-D):无人在回路,
-    // fail-closed 跳过该步,绝不静默自动批准(claude 步骤一律 bypassPermissions,更不能放过)。
-    if n == 0 {
-        eprintln!("    (stdin closed; skipping '{step_id}')");
-        return Command::SkipStep {
-            step_id: step_id.to_string(),
+    let input = if n == 0 { None } else { Some(line.as_str()) };
+    gate_command(input, step_id, gate_kind)
+}
+
+/// 门输入 → 指令的纯函数(prompt_gate 只做 IO)。`input = None` 表示 stdin EOF
+/// (管道结束 / Ctrl-D / CI 无人值守)。
+///
+/// EOF 语义按门的种类分流(codex review P1):
+/// - **Decision 门(step 失败 / verify 未达标 / loop 耗尽 max)→ Abort**:这些门存在
+///   的意义就是"停下来要人裁决";无人在场时 Skip 会把未解决的失败/未收敛转成
+///   RunStatus::Success(exit 0),headless/CI 消费方据 exit code 判断,等于静默放行,
+///   违反"gates progress on real exit codes"的核心契约。EOF → Abort → exit 1,
+///   人显式敲 `s` 才是 Skip(区分"人主动跳过"与"没有人")。
+/// - **Step / Human 门 → Skip**(维持既有语义):step 门是 mode:step 的逐步确认,
+///   human 门 headless 的正路是预置 value;两者 EOF 跳过不会把失败伪装成成功。
+fn gate_command(input: Option<&str>, step_id: &str, gate_kind: &GateKind) -> Command {
+    let Some(raw) = input else {
+        return match gate_kind {
+            GateKind::Decision => {
+                eprintln!("    (stdin closed; aborting at decision gate '{step_id}')");
+                Command::Abort
+            }
+            GateKind::Step | GateKind::Human => {
+                eprintln!("    (stdin closed; skipping '{step_id}')");
+                Command::SkipStep {
+                    step_id: step_id.to_string(),
+                }
+            }
         };
-    }
-    let line = line.trim();
+    };
+    let line = raw.trim();
     if line.starts_with('s') {
         Command::SkipStep {
             step_id: step_id.to_string(),
@@ -181,6 +203,46 @@ fn prompt_gate(step_id: &str, expects_artifact: bool) -> Command {
         Command::ApproveGate {
             step_id: step_id.to_string(),
             artifact,
+        }
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn eof_at_decision_gate_aborts() {
+        // codex review P1 回归:headless(stdin EOF)下决策门绝不能 Skip 成 Success,
+        // 必须 Abort 让 run 以非零 exit code 收尾。
+        assert!(matches!(
+            gate_command(None, "fixloop", &GateKind::Decision),
+            Command::Abort
+        ));
+    }
+
+    #[test]
+    fn eof_at_step_and_human_gates_skips() {
+        assert!(matches!(
+            gate_command(None, "impl", &GateKind::Step),
+            Command::SkipStep { .. }
+        ));
+        assert!(matches!(
+            gate_command(None, "mr", &GateKind::Human),
+            Command::SkipStep { .. }
+        ));
+    }
+
+    #[test]
+    fn explicit_skip_and_approve_unchanged() {
+        // 人显式敲 `s` 仍是 Skip(与 EOF 的 Abort 区分),y + artifact 正常批准。
+        assert!(matches!(
+            gate_command(Some("s\n"), "fixloop", &GateKind::Decision),
+            Command::SkipStep { .. }
+        ));
+        match gate_command(Some("y https://mr/1\n"), "mr", &GateKind::Human) {
+            Command::ApproveGate { artifact, .. } => assert_eq!(artifact.as_deref(), Some("https://mr/1")),
+            other => panic!("expected ApproveGate, got {other:?}"),
         }
     }
 }

@@ -15,6 +15,13 @@ fn runner_bins() -> RunnerBins {
     }
 }
 
+fn prepare_manifest(mut manifest: Manifest) -> Result<Manifest, String> {
+    let registry = agentpipe_engine::agents::AgentRegistry::load_default().map_err(|e| e.to_string())?;
+    agentpipe_engine::agents::resolve_agents(&mut manifest, &registry);
+    manifest.validate().map_err(|e| e.to_string())?;
+    Ok(manifest)
+}
+
 /// 模板目录:安装后读打进 bundle 的资源(自包含,与 tauri.conf.json > bundle > resources
 /// 同一相对路径语法);dev 模式或资源缺失时兜底回源码仓 templates/。
 fn templates_dir(app: &AppHandle) -> std::path::PathBuf {
@@ -29,7 +36,7 @@ fn templates_dir(app: &AppHandle) -> std::path::PathBuf {
 /// 校验通过的 manifest → 启动引擎(单 Run 不变式:已有活跃 Run 则拒绝)。
 /// start_run(从文件) 与 start_run_inline(从对象) 共用此尾段。
 fn launch(app: AppHandle, state: &State<AppState>, manifest: Manifest) -> Result<(), String> {
-    manifest.validate().map_err(|e| e.to_string())?;
+    let manifest = prepare_manifest(manifest)?;
     let mut active = state.active.lock().unwrap();
     if active.is_some() {
         return Err("已有运行中的 Run,请先结束".into());
@@ -115,8 +122,7 @@ pub fn load_template(app: AppHandle, name: String) -> Result<Manifest, String> {
     let manifest = Manifest::parse(&yaml).map_err(|e| e.to_string())?;
     // 与 save_manifest / launch 同一道校验:非法模板在载入时 fail-loud 报出,
     // 而不是留到保存/运行时才炸(那时 GUI 已经把它当成合法 manifest 渲染)。
-    manifest.validate().map_err(|e| e.to_string())?;
-    Ok(manifest)
+    prepare_manifest(manifest)
 }
 
 // ==== 审计读命令 ====

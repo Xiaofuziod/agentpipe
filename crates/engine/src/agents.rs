@@ -60,9 +60,43 @@ impl AgentRegistry {
     }
 }
 
+/// pre-pass:把 registry 命中回填进 command 为 None 的 acp step(含 loop body 递归)。
+/// 查不到不报错 —— "仍为 None" 由 Manifest::validate 给可解释报错,validate 保持纯函数。
+/// 调用时机:宿主 parse 之后、validate / Executor::try_new 之前。
+pub fn resolve_agents(manifest: &mut crate::manifest::Manifest, registry: &AgentRegistry) {
+    fn walk(steps: &mut [crate::manifest::Step], registry: &AgentRegistry) {
+        for s in steps {
+            match &mut s.kind {
+                crate::manifest::StepKind::Acp { agent, command, .. } => {
+                    if command.is_none() {
+                        if let Some(c) = registry.command_for(agent) {
+                            *command = Some(c.to_string());
+                        }
+                    }
+                }
+                crate::manifest::StepKind::Loop { body, .. } => walk(body, registry),
+                _ => {}
+            }
+        }
+    }
+    walk(&mut manifest.steps, registry);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn collect_acp_commands(steps: &[crate::manifest::Step]) -> Vec<Option<String>> {
+        let mut out = Vec::new();
+        for s in steps {
+            match &s.kind {
+                crate::manifest::StepKind::Acp { command, .. } => out.push(command.clone()),
+                crate::manifest::StepKind::Loop { body, .. } => out.extend(collect_acp_commands(body)),
+                _ => {}
+            }
+        }
+        out
+    }
 
     #[test]
     fn missing_file_is_empty_registry() {
@@ -89,5 +123,20 @@ mod tests {
         std::fs::write(&p, "[agents.gemini\ncommand=").unwrap();
         let err = AgentRegistry::load_from(&p).unwrap_err().to_string();
         assert!(err.contains("解析失败"), "{err}");
+    }
+
+    #[test]
+    fn resolve_fills_only_missing_command_recursively() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: gemini\n    prompt: p\n  - id: b\n    kind: acp\n    agent: gemini\n    command: inline-wins\n    prompt: p\n  - id: l\n    kind: loop\n    until: codex-clean\n    max: 2\n    body:\n      - id: r\n        kind: codex\n        action: review-mr\n        base: main\n      - id: inner\n        kind: acp\n        agent: gemini\n        prompt: p\n";
+        let mut m = crate::manifest::Manifest::parse(y).unwrap();
+        let mut reg = AgentRegistry::default();
+        reg.map.insert("gemini".into(), "gemini --acp".into());
+        resolve_agents(&mut m, &reg);
+        let cmds: Vec<Option<String>> = collect_acp_commands(&m.steps);
+        assert_eq!(cmds, vec![
+            Some("gemini --acp".into()),
+            Some("inline-wins".into()),
+            Some("gemini --acp".into()),
+        ]);
     }
 }

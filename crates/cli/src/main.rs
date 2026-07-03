@@ -51,7 +51,9 @@ fn load_manifest(path: &str) -> Manifest {
         eprintln!("failed to read {path}: {e}");
         std::process::exit(1);
     });
-    match Manifest::parse(&yaml).and_then(|m| {
+    match Manifest::parse(&yaml).and_then(|mut m| {
+        let registry = agentpipe_engine::agents::AgentRegistry::load_default()?;
+        agentpipe_engine::agents::resolve_agents(&mut m, &registry);
         m.validate()?;
         Ok(m)
     }) {

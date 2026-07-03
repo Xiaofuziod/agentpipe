@@ -94,9 +94,10 @@ pub enum StepKind {
     Acp {
         /// 显示用 agent 名称(日志 / UI 展示用,例 "gemini" / "claude-acp")。
         agent: String,
-        /// 启动外部 ACP server 的完整命令(shell-words 切分),例:
-        /// `"npx @agentclientprotocol/claude-agent-acp"` 或绝对路径 + args。
-        command: String,
+        /// 启动外部 ACP server 的完整命令(shell-words 切分)。可省略:由
+        /// `agents::resolve_agents` pre-pass 按 agent 名从 agents.toml 回填。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
         /// 提示词;支持 `{{step-id.field}}` 插值。
         prompt: String,
         /// 可选校验门:与 claude step 同语义(裁判 codex/claude/command 与 step 类型解耦)。
@@ -339,12 +340,21 @@ impl Manifest {
             }
             StepKind::Acp { agent, command, prompt, verify } => {
                 Self::require_non_empty(&step.id, "acp.agent", agent, Some("显示用名称"))?;
-                Self::require_non_empty(
-                    &step.id,
-                    "acp.command",
-                    command,
-                    Some("启动外部 agent 的完整命令"),
-                )?;
+                match command {
+                    None => {
+                        return Err(EngineError::Validation(format!(
+                            "step '{}': acp.command 缺失,且 agents registry 未命中 '{agent}'。两条出路:在 step 内联 command,或在 {}/agents.toml 增加 [agents.{agent}] command = \"...\"",
+                            step.id,
+                            crate::paths::base_dir().display()
+                        )))
+                    }
+                    Some(c) => Self::require_non_empty(
+                        &step.id,
+                        "acp.command",
+                        c,
+                        Some("启动外部 agent 的完整命令"),
+                    )?,
+                }
                 Self::require_non_empty(&step.id, "acp.prompt", prompt, None)?;
                 if let Some(v) = verify {
                     Self::validate_verify(&step.id, v)?;
@@ -485,7 +495,7 @@ mod tests {
         match &m.steps[0].kind {
             StepKind::Acp { agent, command, prompt, .. } => {
                 assert_eq!(agent, "gemini");
-                assert_eq!(command, "gemini --acp");
+                assert_eq!(command.as_deref(), Some("gemini --acp"));
                 assert_eq!(prompt, "hi");
             }
             other => panic!("expected Acp, got {other:?}"),
@@ -511,5 +521,13 @@ mod tests {
     fn acp_verify_command_accepted() {
         let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n    verify:\n      by: command\n      command: \"true\"\n";
         assert!(Manifest::parse(y).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn acp_missing_command_error_mentions_registry() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: gemini\n    prompt: p\n";
+        let err = Manifest::parse(y).unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("agents.toml"), "错误必须指向 registry 出路: {err}");
+        assert!(err.contains("gemini"), "错误必须点名 agent: {err}");
     }
 }

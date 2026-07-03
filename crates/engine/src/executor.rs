@@ -387,11 +387,21 @@ impl Executor {
                 let instr = self.ctx.interpolate(instruction);
                 self.run_human(step, &instr, expects.is_some(), value.as_deref())
             }
-            StepKind::Acp { agent, command, prompt, verify } => self.run_verified_step(
-                &step.id,
-                VerifiedWork::Acp { agent, command, prompt },
-                verify.as_ref(),
-            ),
+            StepKind::Acp { agent, command, prompt, verify } => {
+                let Some(cmd) = command.as_deref() else {
+                    self.fail(&step.id, format!(
+                        "acp step '{}' 的 command 未解析(resolve_agents 未跑或 registry 未命中)",
+                        step.id
+                    ));
+                    self.control.request_abort();
+                    return Err(());
+                };
+                self.run_verified_step(
+                    &step.id,
+                    VerifiedWork::Acp { agent, command: cmd, prompt },
+                    verify.as_ref(),
+                )
+            }
             StepKind::Loop { until, max, allow_residual, body } => {
                 self.run_loop(&step.id, until, *max, *allow_residual, body, gated)
             }

@@ -224,6 +224,40 @@ fn permission_ask_approve_yields_granted() {
 }
 
 #[test]
+fn abort_during_permission_grant_never_reports_ok() {
+    use agentpipe_engine::runner::acp::{PermissionDecision, PermissionMode};
+
+    let control = Arc::new(Control::default());
+    let command = mock_command();
+    let full_cmd = format!("env MOCK_ACP_SCENARIO=permission_probe {command}");
+    let runner = AcpRunner::with_timeout(
+        AcpConfig {
+            agent: "mock-perm-abort".into(),
+            command: full_cmd,
+        },
+        30,
+    );
+    let cwd = std::env::current_dir().unwrap();
+    let control_in_cb = control.clone();
+    let mut cb = |_desc: &str| {
+        control_in_cb.request_abort();
+        PermissionDecision::Approve
+    };
+
+    let err = runner
+        .run(
+            "go",
+            Some(&control),
+            &mut |_l, _r| {},
+            &cwd,
+            PermissionMode::Ask(&mut cb),
+        )
+        .expect_err("control 已中止的 run 不得返回 Ok");
+
+    assert!(format!("{err:?}").contains("中止"), "{err:?}");
+}
+
+#[test]
 fn permission_ask_reject_yields_denied() {
     use agentpipe_engine::runner::acp::PermissionDecision;
     let out = run_scenario_perm("permission_probe", &mut |_| PermissionDecision::RejectOnce)

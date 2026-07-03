@@ -268,7 +268,15 @@ impl AcpRunner {
             // worker 退出 → 取结果。block(short)是必要的:worker 在 send result 后
             // 释放 result_tx,这里等到 worker 真正 send 完。
             match result_rx.recv() {
-                Ok(r) => r,
+                Ok(r) => {
+                    // join 终裁(review P1):join happens-after worker 终态,此处判 abort
+                    // 无竞态窗。只做 Ok→Err 单向折叠;worker 自身的 Err(超时/通信
+                    // 失败)保留原错误。
+                    if control.is_some_and(|c| c.is_aborted()) && r.is_ok() {
+                        return Err(EngineError::Cli("acp: 被用户中止".into()));
+                    }
+                    r
+                }
                 Err(_) => Err(EngineError::Cli("acp: 工作线程异常退出未返回结果".into())),
             }
         })

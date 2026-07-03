@@ -49,19 +49,19 @@ pub struct Step {
 pub enum StepKind {
     Claude {
         prompt: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         skill: Option<String>,
         /// 可选校验门:步骤跑完后判目标是否达成,未达成带反馈重试。见 verify-gate spec。
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         verify: Option<Verify>,
     },
     Codex {
         action: CodexAction,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         base: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
         /// 可选自反驳核验:review 结果非 clean 时追加一次 read-only codex 调用,
         /// 逐条用代码证据复核 findings,误报在喂给下游 fixer 前被过滤。
@@ -71,7 +71,7 @@ pub enum StepKind {
     },
     Human {
         instruction: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         expects: Option<String>,
         /// 启动时预置的人工输入(GUI「启动任务」表单注入)。Some 且插值后非空则直接记录为
         /// 产物、跳过人工 gate;否则维持发 gate 等用户。模板不存此字段(保持通用),仅
@@ -102,10 +102,10 @@ pub enum StepKind {
         prompt: String,
         /// 可选校验门:与 claude step 同语义(裁判 codex/claude/command 与 step 类型解耦)。
         /// 见 acp-hardening spec D2。
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         verify: Option<Verify>,
-        /// 反向权限请求策略:缺省 reject 保持旧行为;ask 则交由宿主 Decision gate。
-        #[serde(default)]
+        /// 反向权限请求策略:缺省 reject 保持旧行为;ask 则交由宿主 Permission gate。
+        #[serde(default, skip_serializing_if = "PermissionPolicy::is_reject")]
         on_permission: PermissionPolicy,
     },
 }
@@ -123,20 +123,20 @@ pub enum CodexAction {
 pub struct Verify {
     pub by: Verifier,
     /// codex verifier:判据形态(review-mr / review-doc / ask)。claude verifier 忽略。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<CodexAction>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// codex(ask 指令)或 claude(判定指令)的 prompt。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// claude verifier 的 skill(可选)。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
     /// command verifier 的 shell 命令(仅 by: command 用);exit 0 = 达成。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// 未达成时重跑干活步骤的次数上限(0 = 纯质量门,不重试)。
     #[serde(default = "default_max_retries")]
@@ -176,6 +176,12 @@ pub enum PermissionPolicy {
     #[default]
     Reject,
     Ask,
+}
+
+impl PermissionPolicy {
+    fn is_reject(&self) -> bool {
+        matches!(self, Self::Reject)
+    }
 }
 
 fn default_max_retries() -> u32 {
@@ -608,5 +614,23 @@ mod tests {
             }
             other => panic!("expected Acp, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn minimal_acp_serializes_without_default_noise() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n";
+        let m = Manifest::parse(y).unwrap();
+        let out = serde_yml::to_string(&m).unwrap();
+        assert!(!out.contains("on_permission"), "{out}");
+        assert!(!out.contains("verify"), "{out}");
+        assert!(!out.contains("skill"), "{out}");
+    }
+
+    #[test]
+    fn acp_on_permission_ask_serializes_explicitly() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n    on_permission: ask\n";
+        let m = Manifest::parse(y).unwrap();
+        let out = serde_yml::to_string(&m).unwrap();
+        assert!(out.contains("on_permission: ask"), "{out}");
     }
 }

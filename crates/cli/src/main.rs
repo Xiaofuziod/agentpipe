@@ -52,8 +52,7 @@ fn load_manifest(path: &str) -> Manifest {
         std::process::exit(1);
     });
     match Manifest::parse(&yaml).and_then(|mut m| {
-        let registry = agentpipe_engine::agents::AgentRegistry::load_default()?;
-        agentpipe_engine::agents::resolve_agents(&mut m, &registry);
+        agentpipe_engine::agents::load_and_resolve_if_needed(&mut m)?;
         m.validate()?;
         Ok(m)
     }) {

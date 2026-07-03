@@ -82,6 +82,31 @@ pub fn resolve_agents(manifest: &mut crate::manifest::Manifest, registry: &Agent
     walk(&mut manifest.steps, registry);
 }
 
+/// manifest 是否真的依赖 registry(递归含 command: None 的 acp step)。
+/// 不依赖时宿主应完全跳过 registry 读取 —— 坏 agents.toml 不得波及无关 run。
+pub fn needs_registry(manifest: &crate::manifest::Manifest) -> bool {
+    fn walk(steps: &[crate::manifest::Step]) -> bool {
+        steps.iter().any(|s| match &s.kind {
+            crate::manifest::StepKind::Acp { command, .. } => command.is_none(),
+            crate::manifest::StepKind::Loop { body, .. } => walk(body),
+            _ => false,
+        })
+    }
+
+    walk(&manifest.steps)
+}
+
+/// 按需加载默认 registry 并 resolve:只有存在按名 acp step 时才读 agents.toml。
+pub fn load_and_resolve_if_needed(
+    manifest: &mut crate::manifest::Manifest,
+) -> Result<(), EngineError> {
+    if needs_registry(manifest) {
+        let registry = AgentRegistry::load_default()?;
+        resolve_agents(manifest, &registry);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +163,26 @@ mod tests {
             Some("inline-wins".into()),
             Some("gemini --acp".into()),
         ]);
+    }
+
+    #[test]
+    fn needs_registry_only_for_named_acp_steps_recursively() {
+        let inline = crate::manifest::Manifest::parse(
+            "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: gemini\n    command: inline\n    prompt: p\n",
+        )
+        .unwrap();
+        assert!(!needs_registry(&inline));
+
+        let named = crate::manifest::Manifest::parse(
+            "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: gemini\n    prompt: p\n",
+        )
+        .unwrap();
+        assert!(needs_registry(&named));
+
+        let nested = crate::manifest::Manifest::parse(
+            "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: l\n    kind: loop\n    until: codex-clean\n    max: 1\n    body:\n      - id: r\n        kind: codex\n        action: review-mr\n        base: main\n      - id: a\n        kind: acp\n        agent: gemini\n        prompt: p\n",
+        )
+        .unwrap();
+        assert!(needs_registry(&nested));
     }
 }

@@ -407,9 +407,29 @@ fn format_update_for_log(update: &SessionUpdate) -> String {
             ContentBlock::Text(t) => format!("[think] {}", truncate(&t.text, 80)),
             _ => "[think] <non-text>".to_string(),
         },
-        SessionUpdate::ToolCall(tc) => format!("[tool] {:?}", tc),
-        SessionUpdate::ToolCallUpdate(tc) => format!("[tool-update] {:?}", tc),
-        SessionUpdate::Plan(p) => format!("[plan] {:?}", p),
+        SessionUpdate::ToolCall(tc) => format!(
+            "[tool] {} · {:?} · {:?}",
+            truncate(&tc.title, 60),
+            tc.kind,
+            tc.status
+        ),
+        SessionUpdate::ToolCallUpdate(u) => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(t) = &u.fields.title {
+                parts.push(truncate(t, 60));
+            }
+            if let Some(s) = &u.fields.status {
+                parts.push(format!("{s:?}"));
+            }
+            if parts.is_empty() {
+                parts.push(format!("{:?}", u.tool_call_id));
+            }
+            format!("[tool-update] {}", parts.join(" · "))
+        }
+        SessionUpdate::Plan(p) => {
+            let first = p.entries.first().map(|e| truncate(&e.content, 60)).unwrap_or_default();
+            format!("[plan] {} 项 · {first}", p.entries.len())
+        }
         _ => format!("[update] {:?}", update),
     }
 }
@@ -419,5 +439,36 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max).collect::<String>() + "..."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::{
+        Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCall, ToolCallId,
+        ToolCallStatus, ToolKind,
+    };
+
+    #[test]
+    fn tool_call_renders_title_kind_status_not_debug() {
+        let tc = ToolCall::new(ToolCallId::new("t1"), "读取配置文件")
+            .kind(ToolKind::Read)
+            .status(ToolCallStatus::InProgress);
+        let line = format_update_for_log(&SessionUpdate::ToolCall(tc));
+        assert!(line.starts_with("[tool] "), "{line}");
+        assert!(line.contains("读取配置文件"), "{line}");
+        assert!(!line.contains("ToolCall {"), "不许再用 Debug 全量输出: {line}");
+    }
+
+    #[test]
+    fn plan_renders_entry_count_and_first_item() {
+        let plan = Plan::new(vec![
+            PlanEntry::new("先读代码", PlanEntryPriority::High, PlanEntryStatus::Pending),
+            PlanEntry::new("再改", PlanEntryPriority::Low, PlanEntryStatus::Pending),
+        ]);
+        let line = format_update_for_log(&SessionUpdate::Plan(plan));
+        assert!(line.starts_with("[plan] 2 项"), "{line}");
+        assert!(line.contains("先读代码"), "{line}");
     }
 }

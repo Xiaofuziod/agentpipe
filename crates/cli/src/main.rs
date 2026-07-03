@@ -149,10 +149,10 @@ fn cmd_run(task: &str, dry_run: bool, json: bool) {
 mod commands;
 
 fn prompt_gate(step_id: &str, expects_artifact: bool, gate_kind: &GateKind) -> Command {
-    let hint = if expects_artifact {
-        "[y <artifact> / s skip]"
-    } else {
-        "[y approve / s skip]"
+    let hint = match (gate_kind, expects_artifact) {
+        (GateKind::Permission, _) => "[y 批准 / s 拒绝 / other 中止]",
+        (_, true) => "[y <artifact> / s skip]",
+        _ => "[y approve / s skip]",
     };
     eprint!("    > {hint} ");
     let _ = std::io::stderr().flush();
@@ -166,7 +166,7 @@ fn prompt_gate(step_id: &str, expects_artifact: bool, gate_kind: &GateKind) -> C
 /// (管道结束 / Ctrl-D / CI 无人值守)。
 ///
 /// EOF 语义按门的种类分流(codex review P1):
-/// - **Decision 门(step 失败 / verify 未达标 / loop 耗尽 max)→ Abort**:这些门存在
+/// - **Decision / Permission 门 → Abort**:这些门存在
 ///   的意义就是"停下来要人裁决";无人在场时 Skip 会把未解决的失败/未收敛转成
 ///   RunStatus::Success(exit 0),headless/CI 消费方据 exit code 判断,等于静默放行,
 ///   违反"gates progress on real exit codes"的核心契约。EOF → Abort → exit 1,
@@ -176,8 +176,8 @@ fn prompt_gate(step_id: &str, expects_artifact: bool, gate_kind: &GateKind) -> C
 fn gate_command(input: Option<&str>, step_id: &str, gate_kind: &GateKind) -> Command {
     let Some(raw) = input else {
         return match gate_kind {
-            GateKind::Decision => {
-                eprintln!("    (stdin closed; aborting at decision gate '{step_id}')");
+            GateKind::Decision | GateKind::Permission => {
+                eprintln!("    (stdin closed; aborting at gate '{step_id}')");
                 Command::Abort
             }
             GateKind::Step | GateKind::Human => {
@@ -189,6 +189,20 @@ fn gate_command(input: Option<&str>, step_id: &str, gate_kind: &GateKind) -> Com
         };
     };
     let line = raw.trim();
+    if matches!(gate_kind, GateKind::Permission) {
+        return if line.starts_with('y') {
+            Command::ApproveGate {
+                step_id: step_id.to_string(),
+                artifact: None,
+            }
+        } else if line.starts_with('s') {
+            Command::SkipStep {
+                step_id: step_id.to_string(),
+            }
+        } else {
+            Command::Abort
+        };
+    }
     if line.starts_with('s') {
         Command::SkipStep {
             step_id: step_id.to_string(),
@@ -220,6 +234,14 @@ mod gate_tests {
     }
 
     #[test]
+    fn eof_at_permission_gate_aborts() {
+        assert!(matches!(
+            gate_command(None, "acp", &GateKind::Permission),
+            Command::Abort
+        ));
+    }
+
+    #[test]
     fn eof_at_step_and_human_gates_skips() {
         assert!(matches!(
             gate_command(None, "impl", &GateKind::Step),
@@ -242,5 +264,25 @@ mod gate_tests {
             Command::ApproveGate { artifact, .. } => assert_eq!(artifact.as_deref(), Some("https://mr/1")),
             other => panic!("expected ApproveGate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn permission_gate_uses_approve_and_reject_commands() {
+        assert!(matches!(
+            gate_command(Some("y\n"), "acp", &GateKind::Permission),
+            Command::ApproveGate { .. }
+        ));
+        assert!(matches!(
+            gate_command(Some("s\n"), "acp", &GateKind::Permission),
+            Command::SkipStep { .. }
+        ));
+    }
+
+    #[test]
+    fn permission_gate_aborts_on_other_input() {
+        assert!(matches!(
+            gate_command(Some("nope\n"), "acp", &GateKind::Permission),
+            Command::Abort
+        ));
     }
 }

@@ -181,9 +181,9 @@ impl Executor {
                                 PermissionPolicy::Ask => {
                                     ask_cb = |desc: &str| {
                                         let suggestion = format!(
-                                            "acp step 权限请求:{desc}。批准=允许一次 / 跳过=拒绝该请求 / 中止=终止 run"
+                                            "acp step 权限请求:{desc}。批准 / 拒绝 / 中止"
                                         );
-                                        match self.decision_gate(step_id, suggestion) {
+                                        match self.gate_with_kind(step_id, suggestion, GateKind::Permission) {
                                             StepDecision::Retry => PermissionDecision::Approve,
                                             StepDecision::Skip => PermissionDecision::RejectOnce,
                                             StepDecision::Abort => PermissionDecision::Abort,
@@ -446,7 +446,7 @@ impl Executor {
     /// 误分类为 Failed("引擎失败"),Tauri 宿主当前用 Command::Abort+request_abort 配对
     /// 才避开这条,但引擎库 API 不该依赖 host 的对齐 — 这里 fail-loud 翻 abort 标志,
     /// 与 Tauri 路径同构,SDK 嵌入方零负担。
-    fn decision_gate(&self, step_id: &str, suggestion: String) -> StepDecision {
+    fn gate_with_kind(&self, step_id: &str, suggestion: String, kind: GateKind) -> StepDecision {
         if self.control.is_aborted() {
             return StepDecision::Abort;
         }
@@ -454,7 +454,7 @@ impl Executor {
             step_id: step_id.to_string(),
             suggestion,
             expects_artifact: false,
-            gate_kind: GateKind::Decision,
+            gate_kind: kind,
         });
         match self.commands.recv() {
             Ok(Command::ApproveGate { .. }) => StepDecision::Retry,
@@ -467,6 +467,10 @@ impl Executor {
                 StepDecision::Abort
             }
         }
+    }
+
+    fn decision_gate(&self, step_id: &str, suggestion: String) -> StepDecision {
+        self.gate_with_kind(step_id, suggestion, GateKind::Decision)
     }
 
     /// step 失败(进程非零)的处理:发 StepFailed 后走决策 gate。

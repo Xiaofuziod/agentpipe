@@ -65,7 +65,7 @@ fn acp_step_with_failing_verify_on_unmet_fail() {
 }
 
 #[test]
-fn acp_ask_policy_opens_decision_gate_and_approve_grants() {
+fn acp_ask_policy_opens_permission_gate_and_approve_grants() {
     let command =
         mock_command().replace("MOCK_ACP_SCENARIO=happy", "MOCK_ACP_SCENARIO=permission_probe");
     let yaml = format!(
@@ -74,7 +74,7 @@ fn acp_ask_policy_opens_decision_gate_and_approve_grants() {
     let manifest = Manifest::parse(&yaml).unwrap();
     let (etx, erx) = mpsc::channel();
     let (ctx_tx, crx) = mpsc::channel::<Command>();
-    // 预置批准指令:权限门弹出时 decision_gate 的 recv 立即拿到 Approve。
+    // 预置批准指令:权限门弹出时 permission gate 的 recv 立即拿到 Approve。
     ctx_tx
         .send(Command::ApproveGate {
             step_id: "a".into(),
@@ -97,9 +97,9 @@ fn acp_ask_policy_opens_decision_gate_and_approve_grants() {
     assert!(matches!(status, RunStatus::Success), "{events:?}");
     assert!(
         events.iter().any(|e| matches!(e,
-            Event::StepAwaitingGate { gate_kind: GateKind::Decision, suggestion, .. }
+            Event::StepAwaitingGate { gate_kind: GateKind::Permission, suggestion, .. }
                 if suggestion.contains("权限请求"))),
-        "ask 策略必须弹 Decision 门: {events:?}"
+        "ask 策略必须弹 Permission 门: {events:?}"
     );
 }
 

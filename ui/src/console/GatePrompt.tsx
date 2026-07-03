@@ -50,9 +50,9 @@ export function GatePrompt({ gate }: { gate: GateView }) {
           {gate.gate_kind === "decision" ? "重试" : "批准"}
         </button>
         <button className="btn btn-sm" onClick={skip} disabled={sent}>
-          跳过
+          {gate.gate_kind === "permission" ? "拒绝" : "跳过"}
         </button>
-        {gate.gate_kind === "decision" && (
+        {(gate.gate_kind === "decision" || gate.gate_kind === "permission") && (
           <button className="btn btn-danger btn-sm" onClick={abort} disabled={sent}>
             中止
           </button>

@@ -26,6 +26,19 @@ describe("runReducer", () => {
     expect(s.activeGate).toBeNull();
   });
 
+  it("captures permission gates as active gates", () => {
+    let s = initialRunState();
+    s = runReducer(s, {
+      type: "StepAwaitingGate",
+      step_id: "acp",
+      suggestion: "acp step 权限请求: read file",
+      expects_artifact: false,
+      gate_kind: "permission",
+    });
+    expect(s.activeGate?.gate_kind).toBe("permission");
+    expect(s.steps.acp.status).toBe("AwaitingGate");
+  });
+
   it("captures worktree ready and failure", () => {
     let s = initialRunState();
     s = runReducer(s, { type: "WorktreeReady", path: "/tmp/wt/repo-1", branch: "agentpipe/x-1" });

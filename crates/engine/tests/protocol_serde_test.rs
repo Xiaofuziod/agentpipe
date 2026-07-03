@@ -24,6 +24,18 @@ fn gate_event_carries_kind() {
 }
 
 #[test]
+fn permission_gate_serializes_lowercase() {
+    let e = Event::StepAwaitingGate {
+        step_id: "a".into(),
+        suggestion: "allow?".into(),
+        expects_artifact: false,
+        gate_kind: GateKind::Permission,
+    };
+    let j = serde_json::to_string(&e).unwrap();
+    assert!(j.contains("\"gate_kind\":\"permission\""));
+}
+
+#[test]
 fn step_progress_carries_round() {
     // UI 镜像(ui/src/types.ts)依赖字段名 "round";锁住 wire shape。
     let e = Event::StepProgress {

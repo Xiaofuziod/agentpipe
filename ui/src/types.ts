@@ -25,7 +25,7 @@ export type StepKind =
 export type Step = { id: string } & StepKind;
 export type Manifest = { version: 1; name: string; target: string; mode: RunMode; worktree?: boolean; budget_usd?: number | null; steps: Step[] };
 
-export type GateKind = "step" | "human" | "decision";
+export type GateKind = "step" | "human" | "decision" | "permission";
 export type StepStatus = "Pending" | "Running" | "AwaitingGate" | "Done" | "Failed" | "Skipped";
 export type RunStatus = "Success" | "Failed" | "Aborted";
 

@@ -169,7 +169,7 @@ pub enum OnUnmet {
 }
 
 /// acp 反向权限请求策略:reject = 一律拒(缺省,fail-closed 现状);
-/// ask = 经 GateKind::Decision 决策门问宿主。见 acp-hardening spec D3。
+/// ask = 经 GateKind::Permission 权限门问宿主。见 acp-hardening spec D3。
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq, Clone, Copy)]
 #[serde(rename_all = "lowercase")]
 pub enum PermissionPolicy {

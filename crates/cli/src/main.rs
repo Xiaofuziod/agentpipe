@@ -43,10 +43,7 @@ enum Cmd {
 
 /// ~/.agentpipe/runs(AGENTPIPE_HOME 优先)。
 pub(crate) fn runs_dir() -> PathBuf {
-    let base = std::env::var("AGENTPIPE_HOME")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join(".agentpipe").join("runs")
+    agentpipe_engine::paths::base_dir().join("runs")
 }
 
 fn load_manifest(path: &str) -> Manifest {

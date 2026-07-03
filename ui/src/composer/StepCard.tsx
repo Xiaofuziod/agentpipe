@@ -14,7 +14,7 @@ export function defaultsFor(kind: StepKind["kind"]): StepKind {
     case "loop":
       return { kind: "loop", until: "codex-clean", max: 5, body: [] };
     case "acp":
-      return { kind: "acp", agent: "", command: "", prompt: "" };
+      return { kind: "acp", agent: "", prompt: "" };
   }
 }
 
@@ -35,8 +35,11 @@ export function stepSummary(step: Step): string {
       return step.instruction || "(空指令)";
     case "loop":
       return `until:codex-clean · 最多 ${step.max} 轮 · ${step.body.length} 步`;
-    case "acp":
-      return `${step.agent || "(未指定 agent)"} · ${step.command || "(未指定 command)"}`;
+    case "acp": {
+      const vSummary = verifySummary(step.verify);
+      const tags = [step.command || "按 registry", vSummary || undefined].filter(Boolean);
+      return `${step.agent || "(未指定 agent)"} · ${tags.join(" ")}`;
+    }
   }
 }
 

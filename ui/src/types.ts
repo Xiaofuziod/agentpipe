@@ -1,7 +1,7 @@
 export type RunMode = "step" | "auto";
 export type CodexAction = "review-doc" | "review-mr" | "ask";
 
-// 与 crates/engine/src/manifest.rs 的 Verify 手工镜像同步(挂在 claude 步骤上)
+// 与 crates/engine/src/manifest.rs 的 Verify 手工镜像同步(挂在 claude/acp 步骤上)
 export type Verify = {
   by: "codex" | "claude" | "command";
   action?: CodexAction; // codex verifier 用
@@ -20,7 +20,7 @@ export type StepKind =
   | { kind: "codex"; action: CodexAction; path?: string; base?: string; prompt?: string; vet?: boolean }
   | { kind: "human"; instruction: string; expects?: string; value?: string }
   | { kind: "loop"; until: "codex-clean"; max: number; body: Step[]; allow_residual?: "nit" | "minor" | "major" }
-  | { kind: "acp"; agent: string; command: string; prompt: string };
+  | { kind: "acp"; agent: string; command?: string; prompt: string; verify?: Verify; on_permission?: "reject" | "ask" };
 
 export type Step = { id: string } & StepKind;
 export type Manifest = { version: 1; name: string; target: string; mode: RunMode; worktree?: boolean; budget_usd?: number | null; steps: Step[] };

@@ -188,12 +188,28 @@ fn default_true() -> bool {
 /// verify.max_retries 的硬上限,防 runaway(每次重试都烧一个 claude + 一个 codex)。
 const MAX_VERIFY_RETRIES: u32 = 10;
 
+#[derive(Clone, Copy)]
+enum ValidationMode {
+    Authoring,
+    Run,
+}
+
 impl Manifest {
     pub fn parse(yaml: &str) -> Result<Self, EngineError> {
         serde_yml::from_str(yaml).map_err(|e| EngineError::Parse(e.to_string()))
     }
 
     pub fn validate(&self) -> Result<(), EngineError> {
+        self.validate_impl(ValidationMode::Run)
+    }
+
+    /// 作者态校验:容忍 acp command: None("还没配 registry"是运行前置条件,
+    /// 不是模板非法);Some("") 空串仍拒;其余规则与 Run 完全一致。
+    pub fn validate_authoring(&self) -> Result<(), EngineError> {
+        self.validate_impl(ValidationMode::Authoring)
+    }
+
+    fn validate_impl(&self, mode: ValidationMode) -> Result<(), EngineError> {
         if let Some(b) = self.budget_usd {
             // NaN / 负数 / 0 都无意义(0 = 任何 step 完成就触发,无法跑);用 is_finite 防 inf/NaN 误配。
             if !b.is_finite() || b <= 0.0 {
@@ -213,7 +229,7 @@ impl Manifest {
             }
         }
         for step in &self.steps {
-            Self::validate_step(step)?;
+            Self::validate_step(step, mode)?;
         }
         Ok(())
     }
@@ -293,7 +309,7 @@ impl Manifest {
         Ok(())
     }
 
-    fn validate_step(step: &Step) -> Result<(), EngineError> {
+    fn validate_step(step: &Step, mode: ValidationMode) -> Result<(), EngineError> {
         match &step.kind {
             StepKind::Claude { verify, .. } => {
                 if let Some(v) = verify {
@@ -347,20 +363,21 @@ impl Manifest {
                     )));
                 }
                 for s in body {
-                    Self::validate_step(s)?;
+                    Self::validate_step(s, mode)?;
                 }
                 Ok(())
             }
             StepKind::Acp { agent, command, prompt, verify, .. } => {
                 Self::require_non_empty(&step.id, "acp.agent", agent, Some("显示用名称"))?;
                 match command {
-                    None => {
+                    None if matches!(mode, ValidationMode::Run) => {
                         return Err(EngineError::Validation(format!(
                             "step '{}': acp.command 缺失,且 agents registry 未命中 '{agent}'。两条出路:在 step 内联 command,或在 {}/agents.toml 增加 [agents.{agent}] command = \"...\"",
                             step.id,
                             crate::paths::base_dir().display()
                         )))
                     }
+                    None => {}
                     Some(c) => Self::require_non_empty(
                         &step.id,
                         "acp.command",
@@ -521,6 +538,33 @@ mod tests {
         let m = Manifest::parse(y).unwrap();
         let err = m.validate().unwrap_err();
         assert!(err.to_string().contains("command"), "err = {err}");
+    }
+
+    #[test]
+    fn validate_authoring_allows_named_acp_without_command() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: ask\n    kind: acp\n    agent: \"gemini\"\n    prompt: \"hi\"\n";
+        let m = Manifest::parse(y).unwrap();
+        assert!(m.validate_authoring().is_ok());
+        assert!(m.validate().is_err(), "Run 档仍必须拒绝未解析 command");
+    }
+
+    #[test]
+    fn validate_authoring_rejects_empty_acp_command() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: ask\n    kind: acp\n    agent: \"gemini\"\n    command: \"\"\n    prompt: \"hi\"\n";
+        let m = Manifest::parse(y).unwrap();
+        let err = m.validate_authoring().unwrap_err();
+        assert!(err.to_string().contains("command"), "err = {err}");
+    }
+
+    #[test]
+    fn validate_authoring_keeps_budget_unmetered_guard() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nsteps:\n  - id: ask\n    kind: acp\n    agent: \"gemini\"\n    prompt: \"hi\"\n";
+        let err = Manifest::parse(y)
+            .unwrap()
+            .validate_authoring()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("allow_unmetered"), "err = {err}");
     }
 
     #[test]

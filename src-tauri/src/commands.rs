@@ -82,7 +82,7 @@ pub fn send_command(state: State<AppState>, cmd: Command) -> Result<(), String> 
 
 #[tauri::command]
 pub fn save_manifest(manifest: Manifest, path: String) -> Result<(), String> {
-    manifest.validate().map_err(|e| e.to_string())?;
+    manifest.validate_authoring().map_err(|e| e.to_string())?;
     let yaml = serde_yml::to_string(&manifest).map_err(|e| e.to_string())?;
     // 安装后 GUI 进程 cwd=/(只读),裸名 / 相对路径会写到只读根 → EROFS。
     // 统一经 resolve_task_path 落到可写的 ~/.agentpipe/tasks/(或用户给的绝对路径)。
@@ -119,9 +119,9 @@ pub fn load_template(app: AppHandle, name: String) -> Result<Manifest, String> {
     let p = templates_dir(&app).join(format!("{name}.yaml"));
     let yaml = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
     let manifest = Manifest::parse(&yaml).map_err(|e| e.to_string())?;
-    // 与 save_manifest / launch 同一道校验:非法模板在载入时 fail-loud 报出,
-    // 而不是留到保存/运行时才炸(那时 GUI 已经把它当成合法 manifest 渲染)。
-    prepare_for_launch(manifest)
+    // 读写边界只做作者态校验:按名 acp 模板可打开,运行前再 resolve + Run 校验。
+    manifest.validate_authoring().map_err(|e| e.to_string())?;
+    Ok(manifest)
 }
 
 // ==== 审计读命令 ====
@@ -317,6 +317,19 @@ mod tests {
         // 同一 step "a" 成本不同 → changed
         assert!(rows.iter().any(|r| r.step_id == "a" && r.kind == "changed"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_manifest_accepts_named_acp_template() {
+        let path = tmp("named-acp-template.yaml");
+        let manifest = Manifest::parse("version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: gemini\n    prompt: hi\n").unwrap();
+
+        save_manifest(manifest, path.to_string_lossy().into_owned()).expect("作者态应允许 command 省略");
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("agent: gemini"), "{saved}");
+        assert!(!saved.contains("command:"), "{saved}");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

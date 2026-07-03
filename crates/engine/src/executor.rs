@@ -21,7 +21,6 @@ enum StepDecision {
 /// 干活步骤的种类:verify-retry 循环内"跑一次 attempt"的分派参数。
 /// review §A finding #7 的差异体现在 Err 分支:Acp 的 runner-Err 不进决策门
 /// (metrics 恒 None,budget 兜不住重试烧钱),失败 = fail + request_abort。
-#[allow(dead_code)] // Task 3 接入后移除
 enum VerifiedWork<'a> {
     Claude { prompt: &'a str, skill: Option<&'a str> },
     Acp { agent: &'a str, command: &'a str, prompt: &'a str },
@@ -388,45 +387,11 @@ impl Executor {
                 let instr = self.ctx.interpolate(instruction);
                 self.run_human(step, &instr, expects.is_some(), value.as_deref())
             }
-            StepKind::Acp { agent, command, prompt } => {
-                // review §A finding #7:ACP step 不走自动 retry loop。理由:ACP runner
-                // 当前 metrics 永远 None(F1),如果遇到 empty-answer / 配错 agent 一类
-                // fail-loud 失败,decision_gate 的 Retry 选项在 budget_usd=None 时不被
-                // budget 兜底,容易让用户连点 Retry 无限烧 LLM 钱。
-                //
-                // 与 claude(有 verify-retry 语义)/ codex(单次 review)不同:ACP 是
-                // 「跑一次拿 answer」的通用接入层,没有 verify 概念,失败重试本应由
-                // 用户手动重启 run(顺便确认是否调整 budget),不在自动决策门内重试。
-                // Skip / Abort 仍可走。
-                let mut on_line = self.progress_sink(&step.id);
-                let p = self.ctx.interpolate(prompt);
-                let runner = crate::runner::acp::AcpRunner::new(crate::runner::acp::AcpConfig {
-                    agent: agent.clone(),
-                    command: command.clone(),
-                });
-                match runner.run(&p, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd) {
-                    Ok(out) => {
-                        // 同 codex/claude 路径:charge 单次 → check_budget 带 cumulative。
-                        // ACP 单次 step 无累积,cumulative = 单次。
-                        self.charge(&out.metrics);
-                        self.check_budget(&step.id, &out.metrics)?;
-                        self.ctx.record(&step.id, StepOutput {
-                            artifact: Some(out.answer.clone()),
-                            ..Default::default()
-                        });
-                        self.finish(&step.id, "done · acp".into(), out.metrics);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        // 失败直接 emit StepFailed + Err 退 step,不走 decision_gate。
-                        // 触发 abort 标志让 run() 顶层分类落 Aborted("ACP 失败,人工
-                        // 重启 run"),与「budget=None 时的隐式重试 LLM 烧钱」彻底脱钩。
-                        self.fail(&step.id, e.to_string());
-                        self.control.request_abort();
-                        Err(())
-                    }
-                }
-            }
+            StepKind::Acp { agent, command, prompt, verify } => self.run_verified_step(
+                &step.id,
+                VerifiedWork::Acp { agent, command, prompt },
+                verify.as_ref(),
+            ),
             StepKind::Loop { until, max, allow_residual, body } => {
                 self.run_loop(&step.id, until, *max, *allow_residual, body, gated)
             }

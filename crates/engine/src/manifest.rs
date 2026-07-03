@@ -90,7 +90,7 @@ pub enum StepKind {
     },
     /// 通用 ACP (Agent Client Protocol) 步骤:把任何实现 ACP server 的外部 agent
     /// (claude-agent-acp / codex-acp / gemini-cli --acp / ...)接入 pipeline。
-    /// 设计见 docs/specs/2026-06-25-acp-integration-design.md。MVP 不带 skill / verify。
+    /// 设计见 docs/specs/2026-06-25-acp-integration-design.md。MVP 不带 skill。
     Acp {
         /// 显示用 agent 名称(日志 / UI 展示用,例 "gemini" / "claude-acp")。
         agent: String,
@@ -99,6 +99,10 @@ pub enum StepKind {
         command: String,
         /// 提示词;支持 `{{step-id.field}}` 插值。
         prompt: String,
+        /// 可选校验门:与 claude step 同语义(裁判 codex/claude/command 与 step 类型解耦)。
+        /// 见 acp-hardening spec D2。
+        #[serde(default)]
+        verify: Option<Verify>,
     },
 }
 
@@ -240,43 +244,46 @@ impl Manifest {
         }
     }
 
+    /// verify 门配置校验(Claude / Acp step 共用,spec D2)。
+    fn validate_verify(step_id: &str, v: &Verify) -> Result<(), EngineError> {
+        match v.by {
+            Verifier::Codex => {
+                let action = v.action.as_ref().ok_or_else(|| {
+                    EngineError::Validation(format!(
+                        "step '{step_id}': verify by codex 需要 action 字段"
+                    ))
+                })?;
+                Self::validate_codex_fields(step_id, "verify codex", action, &v.path, &v.base, &v.prompt)?;
+            }
+            Verifier::Claude => {
+                if v.prompt.is_none() {
+                    return Err(EngineError::Validation(format!(
+                        "step '{step_id}': verify by claude 需要 prompt 字段(判定指令)"
+                    )));
+                }
+            }
+            Verifier::Command => {
+                Self::require_non_empty(
+                    step_id,
+                    "verify command",
+                    v.command.as_deref().unwrap_or(""),
+                    Some("shell 命令,例: command: \"cargo test\""),
+                )?;
+            }
+        }
+        if v.max_retries > MAX_VERIFY_RETRIES {
+            return Err(EngineError::Validation(format!(
+                "step '{step_id}': verify.max_retries 不能超过 {MAX_VERIFY_RETRIES}"
+            )));
+        }
+        Ok(())
+    }
+
     fn validate_step(step: &Step) -> Result<(), EngineError> {
         match &step.kind {
             StepKind::Claude { verify, .. } => {
                 if let Some(v) = verify {
-                    match v.by {
-                        Verifier::Codex => {
-                            let action = v.action.as_ref().ok_or_else(|| {
-                                EngineError::Validation(format!(
-                                    "step '{}': verify by codex 需要 action 字段",
-                                    step.id
-                                ))
-                            })?;
-                            Self::validate_codex_fields(&step.id, "verify codex", action, &v.path, &v.base, &v.prompt)?;
-                        }
-                        Verifier::Claude => {
-                            if v.prompt.is_none() {
-                                return Err(EngineError::Validation(format!(
-                                    "step '{}': verify by claude 需要 prompt 字段(判定指令)",
-                                    step.id
-                                )));
-                            }
-                        }
-                        Verifier::Command => {
-                            Self::require_non_empty(
-                                &step.id,
-                                "verify command",
-                                v.command.as_deref().unwrap_or(""),
-                                Some("shell 命令,例: command: \"cargo test\""),
-                            )?;
-                        }
-                    }
-                    if v.max_retries > MAX_VERIFY_RETRIES {
-                        return Err(EngineError::Validation(format!(
-                            "step '{}': verify.max_retries 不能超过 {MAX_VERIFY_RETRIES}",
-                            step.id
-                        )));
-                    }
+                    Self::validate_verify(&step.id, v)?;
                 }
                 Ok(())
             }
@@ -330,7 +337,7 @@ impl Manifest {
                 }
                 Ok(())
             }
-            StepKind::Acp { agent, command, prompt } => {
+            StepKind::Acp { agent, command, prompt, verify } => {
                 Self::require_non_empty(&step.id, "acp.agent", agent, Some("显示用名称"))?;
                 Self::require_non_empty(
                     &step.id,
@@ -339,6 +346,9 @@ impl Manifest {
                     Some("启动外部 agent 的完整命令"),
                 )?;
                 Self::require_non_empty(&step.id, "acp.prompt", prompt, None)?;
+                if let Some(v) = verify {
+                    Self::validate_verify(&step.id, v)?;
+                }
                 Ok(())
             }
             _ => Ok(()),
@@ -473,7 +483,7 @@ mod tests {
         let m = Manifest::parse(y).unwrap();
         assert!(m.validate().is_ok());
         match &m.steps[0].kind {
-            StepKind::Acp { agent, command, prompt } => {
+            StepKind::Acp { agent, command, prompt, .. } => {
                 assert_eq!(agent, "gemini");
                 assert_eq!(command, "gemini --acp");
                 assert_eq!(prompt, "hi");
@@ -488,5 +498,18 @@ mod tests {
         let m = Manifest::parse(y).unwrap();
         let err = m.validate().unwrap_err();
         assert!(err.to_string().contains("command"), "err = {err}");
+    }
+
+    #[test]
+    fn acp_verify_codex_missing_action_rejected() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n    verify:\n      by: codex\n";
+        let err = Manifest::parse(y).unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("verify by codex 需要 action"), "{err}");
+    }
+
+    #[test]
+    fn acp_verify_command_accepted() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n    verify:\n      by: command\n      command: \"true\"\n";
+        assert!(Manifest::parse(y).unwrap().validate().is_ok());
     }
 }

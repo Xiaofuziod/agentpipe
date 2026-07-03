@@ -104,6 +104,9 @@ pub enum StepKind {
         /// 见 acp-hardening spec D2。
         #[serde(default)]
         verify: Option<Verify>,
+        /// 反向权限请求策略:缺省 reject 保持旧行为;ask 则交由宿主 Decision gate。
+        #[serde(default)]
+        on_permission: PermissionPolicy,
     },
 }
 
@@ -163,6 +166,16 @@ pub enum OnUnmet {
     Gate,
     Fail,
     Continue,
+}
+
+/// acp 反向权限请求策略:reject = 一律拒(缺省,fail-closed 现状);
+/// ask = 经 GateKind::Decision 决策门问宿主。见 acp-hardening spec D3。
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionPolicy {
+    #[default]
+    Reject,
+    Ask,
 }
 
 fn default_max_retries() -> u32 {
@@ -338,7 +351,7 @@ impl Manifest {
                 }
                 Ok(())
             }
-            StepKind::Acp { agent, command, prompt, verify } => {
+            StepKind::Acp { agent, command, prompt, verify, .. } => {
                 Self::require_non_empty(&step.id, "acp.agent", agent, Some("显示用名称"))?;
                 match command {
                     None => {
@@ -529,5 +542,27 @@ mod tests {
         let err = Manifest::parse(y).unwrap().validate().unwrap_err().to_string();
         assert!(err.contains("agents.toml"), "错误必须指向 registry 出路: {err}");
         assert!(err.contains("gemini"), "错误必须点名 agent: {err}");
+    }
+
+    #[test]
+    fn acp_on_permission_defaults_reject_and_parses_ask() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n    on_permission: ask\n";
+        let m = Manifest::parse(y).unwrap();
+        assert!(m.validate().is_ok());
+        match &m.steps[0].kind {
+            StepKind::Acp { on_permission, .. } => {
+                assert_eq!(*on_permission, PermissionPolicy::Ask);
+            }
+            other => panic!("expected Acp, got {other:?}"),
+        }
+        let y2 = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n";
+        let m2 = Manifest::parse(y2).unwrap();
+        assert!(m2.validate().is_ok(), "缺字段 = reject 缺省,向后兼容");
+        match &m2.steps[0].kind {
+            StepKind::Acp { on_permission, .. } => {
+                assert_eq!(*on_permission, PermissionPolicy::Reject);
+            }
+            other => panic!("expected Acp, got {other:?}"),
+        }
     }
 }

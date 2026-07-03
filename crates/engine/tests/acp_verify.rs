@@ -3,7 +3,7 @@
 use agentpipe_engine::control::Control;
 use agentpipe_engine::executor::{Executor, RunnerBins};
 use agentpipe_engine::manifest::Manifest;
-use agentpipe_engine::protocol::{Command, Event, RunStatus};
+use agentpipe_engine::protocol::{Command, Event, GateKind, RunStatus};
 use std::path::PathBuf;
 use std::process::Command as Proc;
 use std::sync::{mpsc, Arc, Once};
@@ -62,4 +62,60 @@ fn acp_step_with_failing_verify_on_unmet_fail() {
     let (status, events) = run_manifest(&yaml);
     assert!(matches!(status, RunStatus::Failed), "events: {events:?}");
     assert!(events.iter().any(|e| matches!(e, Event::StepFailed { .. })));
+}
+
+#[test]
+fn acp_ask_policy_opens_decision_gate_and_approve_grants() {
+    let command =
+        mock_command().replace("MOCK_ACP_SCENARIO=happy", "MOCK_ACP_SCENARIO=permission_probe");
+    let yaml = format!(
+        "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: mock\n    command: \"{command}\"\n    prompt: go\n    on_permission: ask\n"
+    );
+    let manifest = Manifest::parse(&yaml).unwrap();
+    let (etx, erx) = mpsc::channel();
+    let (ctx_tx, crx) = mpsc::channel::<Command>();
+    // 预置批准指令:权限门弹出时 decision_gate 的 recv 立即拿到 Approve。
+    ctx_tx
+        .send(Command::ApproveGate {
+            step_id: "a".into(),
+            artifact: None,
+        })
+        .unwrap();
+    let mut ex = Executor::try_new(
+        manifest,
+        RunnerBins {
+            claude: "unused".into(),
+            codex: "unused".into(),
+        },
+        Arc::new(Control::default()),
+        etx,
+        crx,
+    )
+    .unwrap();
+    let status = ex.run();
+    let events: Vec<Event> = erx.try_iter().collect();
+    assert!(matches!(status, RunStatus::Success), "{events:?}");
+    assert!(
+        events.iter().any(|e| matches!(e,
+            Event::StepAwaitingGate { gate_kind: GateKind::Decision, suggestion, .. }
+                if suggestion.contains("权限请求"))),
+        "ask 策略必须弹 Decision 门: {events:?}"
+    );
+}
+
+#[test]
+fn acp_default_reject_policy_never_opens_gate() {
+    let command =
+        mock_command().replace("MOCK_ACP_SCENARIO=happy", "MOCK_ACP_SCENARIO=permission_probe");
+    let yaml = format!(
+        "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: mock\n    command: \"{command}\"\n    prompt: go\n"
+    );
+    let (status, events) = run_manifest(&yaml);
+    assert!(matches!(status, RunStatus::Success), "{events:?}");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::StepAwaitingGate { .. })),
+        "缺省 reject 不得弹任何门: {events:?}"
+    );
 }

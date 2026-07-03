@@ -1,6 +1,8 @@
 use crate::context::{RunContext, Severity, StepOutput, Verdict};
 use crate::control::Control;
-use crate::manifest::{Manifest, OnUnmet, RunMode, Step, StepKind, Verifier, Verify};
+use crate::manifest::{
+    Manifest, OnUnmet, PermissionPolicy, RunMode, Step, StepKind, Verifier, Verify,
+};
 use crate::protocol::{Command, Event, GateKind, LoopEndReason, RunStatus, StepMetrics, StepStatus};
 use crate::runner::claude::ClaudeRunner;
 use crate::runner::codex::CodexRunner;
@@ -23,7 +25,12 @@ enum StepDecision {
 /// (metrics 恒 None,budget 兜不住重试烧钱),失败 = fail + request_abort。
 enum VerifiedWork<'a> {
     Claude { prompt: &'a str, skill: Option<&'a str> },
-    Acp { agent: &'a str, command: &'a str, prompt: &'a str },
+    Acp {
+        agent: &'a str,
+        command: &'a str,
+        prompt: &'a str,
+        on_permission: PermissionPolicy,
+    },
 }
 
 pub struct Executor {
@@ -161,21 +168,33 @@ impl Executor {
                         .run(&p, *skill, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd, false)
                         .map(|out| (out.answer, out.metrics))
                         .map_err(|e| e.to_string()),
-                    VerifiedWork::Acp { agent, command, .. } => {
+                    VerifiedWork::Acp { agent, command, on_permission, .. } => {
                         let runner = crate::runner::acp::AcpRunner::new(crate::runner::acp::AcpConfig {
                             agent: (*agent).to_string(),
                             command: (*command).to_string(),
                         });
-                        runner
-                            .run(
-                                &p,
-                                Some(self.control.as_ref()),
-                                &mut on_line,
-                                &self.ctx.cwd,
-                                crate::runner::acp::PermissionMode::Reject,
-                            )
-                            .map(|out| (out.answer, out.metrics))
-                            .map_err(|e| e.to_string())
+                        let result = {
+                            use crate::runner::acp::{PermissionDecision, PermissionMode};
+                            let mut ask_cb;
+                            let permission = match on_permission {
+                                PermissionPolicy::Reject => PermissionMode::Reject,
+                                PermissionPolicy::Ask => {
+                                    ask_cb = |desc: &str| {
+                                        let suggestion = format!(
+                                            "acp step 权限请求:{desc}。批准=允许一次 / 跳过=拒绝该请求 / 中止=终止 run"
+                                        );
+                                        match self.decision_gate(step_id, suggestion) {
+                                            StepDecision::Retry => PermissionDecision::Approve,
+                                            StepDecision::Skip => PermissionDecision::RejectOnce,
+                                            StepDecision::Abort => PermissionDecision::Abort,
+                                        }
+                                    };
+                                    PermissionMode::Ask(&mut ask_cb)
+                                }
+                            };
+                            runner.run(&p, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd, permission)
+                        };
+                        result.map(|out| (out.answer, out.metrics)).map_err(|e| e.to_string())
                     }
                 }
             };
@@ -393,7 +412,7 @@ impl Executor {
                 let instr = self.ctx.interpolate(instruction);
                 self.run_human(step, &instr, expects.is_some(), value.as_deref())
             }
-            StepKind::Acp { agent, command, prompt, verify } => {
+            StepKind::Acp { agent, command, prompt, verify, on_permission } => {
                 let Some(cmd) = command.as_deref() else {
                     self.fail(&step.id, format!(
                         "acp step '{}' 的 command 未解析(resolve_agents 未跑或 registry 未命中)",
@@ -404,7 +423,12 @@ impl Executor {
                 };
                 self.run_verified_step(
                     &step.id,
-                    VerifiedWork::Acp { agent, command: cmd, prompt },
+                    VerifiedWork::Acp {
+                        agent,
+                        command: cmd,
+                        prompt,
+                        on_permission: *on_permission,
+                    },
                     verify.as_ref(),
                 )
             }

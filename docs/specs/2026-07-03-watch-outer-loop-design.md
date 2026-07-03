@@ -56,12 +56,14 @@ notify: "osascript -e 'display notification \"{{message}}\"'"   # 可选,置空�
 
 - `authors` 缺失或空数组 → 校验错误。空白名单 = 谁都不信，必须显式列人。这是 prompt 注入的第一道防线：PR 内容会进入 bypassPermissions 的 agent 上下文，等于把执行权交给 PR 作者，watch 只能对可信作者开。
 - `template` 必须存在且 `Manifest::validate` 通过；若 watch 设了 `budget.per_run_usd` 而模板含 ACP step，Phase A D1 的 allow_unmetered 规则同样适用（在 watch 启动期即拦下，不等 run 时）。
-- `bindings` 的 key 必须命中模板中 human step 的 id，插值只支持 `item.*` 命名空间。
+- 模板声明了 `allow_unmetered: true` → watch 启动校验**默认拒绝**：无人值守下双层预算对 ACP step 记 0（audit 只统计带 metrics 的终态），"兜底"对它是空转；确要挂载须在 watch.yaml 顶层再显式声明 `allow_unmetered_template: true`（双重签字——无人值守的确认门槛应高于交互场景）。
+- `bindings` 的 key 必须命中模板中 human step 的 id，插值只支持 `item.*` 命名空间；且模板内**每个** human step 都必须被 bindings 覆盖、插值后非空——headless 下未预置的 human 门会被 Skip，下游 `{{id.artifact}}` 插值成空串静默喂给 bypassPermissions 的 agent（EOF-Skip + context 空串回退的组合坑），必须在启动期拦。
+- 模板 `mode` 必须为 auto：step 门控模板在 headless 下会被逐步 Skip 甚至以 Success 收尾，校验期拒绝。
 
 ### 4.2 item 身份与状态
 
 - item key = `PR 编号 + head SHA`。同一 PR 推了新 commit 就是新 item，自动复审；未变的 head 不重复处理。
-- state 文件：`<AGENTPIPE_HOME 或 ~/.agentpipe>/watch/<name>.json`，内容：已处理 key 集合、每 key 的处置结果（run id + 终态）、按日期滚动的当日累计成本。原子写（tmp + rename），启动时读，坏文件 fail-loud 拒启（宁可人来看一眼，不冒重复烧钱 / 重复评论的险）。
+- state 文件：`base_dir()/watch/<name>.json`（base_dir 语义同 runs 目录：$AGENTPIPE_HOME 或 $HOME 拼 /.agentpipe，公共 helper 抽法见 acp-hardening spec D4），内容：已处理 key 集合、每 key 的处置结果（run id + 终态）、按日期滚动的当日累计成本。原子写（tmp + rename），启动时读，坏文件 fail-loud 拒启（宁可人来看一眼，不冒重复烧钱 / 重复评论的险）。
 
 ### 4.3 scan_once 流程
 
@@ -87,6 +89,7 @@ notify: "osascript -e 'display notification \"{{message}}\"'"   # 可选,置空�
 - 信任边界：白名单作者的 PR 内容视为可信输入；白名单外一律不碰。这与全局设计基线"会执行外部代码的操作必须在用户信任确认后才跑"对齐——白名单就是那个信任确认。
 - watch.yaml 与模板都只接受本机路径，watch 不提供任何远程拉取配置的机制。
 - 评论回写内容仅含 verdict / findings 摘要 / run id / 成本，不含日志全文（避免把内部路径 / 环境细节外泄到 PR）。
+- 预算盲区显式声明：`daily_usd` 基于 audit 聚合成本，只覆盖上报 metrics 的 step；ACP step 在 metrics 接通前对两层预算均不可见（这正是启动校验默认拒绝 allow_unmetered 模板的原因）。
 
 ## 5. 错误路径盘点
 

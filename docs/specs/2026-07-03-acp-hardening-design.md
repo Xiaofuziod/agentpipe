@@ -50,8 +50,10 @@ allow_unmetered: true   # 我知道 acp step 不计入 budget,仍要跑
 
 ### D2. Acp 变体支持 verify 门
 
-- `StepKind::Acp` 增加 `#[serde(default)] verify: Option<Verify>` 字段。verify 的裁判是 codex / claude / command，不依赖被验步骤的类型，纯增量。
-- executor 的 Acp 分支接入与 Claude 分支相同的 verify-retry 路径（重试时带反馈重跑 ACP step）。
+- `StepKind::Acp` 增加 `#[serde(default)] verify: Option<Verify>` 字段。verify 的**裁判**（`verify_once`）确实与 step 类型解耦可直接复用；但 verify-retry **循环本体**当前是内联在 Claude match arm 里的 ~120 行（executor.rs:220-340，与 claude.run / skill / read_only 缠绕），不存在现成共享路径——实现方式定为：先抽出以"跑一次 attempt"为闭包参数的公共 verify-retry helper，Claude 与 Acp 分支共同调用，而非复制或"接入"。
+- **消解在案决策 executor.rs:346-354（review §A finding #7）**：该决策因 ACP metrics 恒 None、budget 无法兜底重试烧钱，把 ACP step 排除在自动 retry / 决策门 Retry 之外（runner 失败直接 fail + request_abort）。本设计与其边界如下：
+  - runner-Err 路径**维持现状不变**：ACP step 自身失败仍不进决策门重试。
+  - verify-retry 仅覆盖"step 成功但校验未达标"场景，重试次数受 verify 的 max_retries（默认 2）与全局 MAX_VERIFY_RETRIES 硬顶双重约束，且该场景已被 D1 的 allow_unmetered 显式签字覆盖——不计费重跑的风险从"隐式复活"变为"用户确认过的有界行为"。
 - metrics 累积走既有 `StepMetrics::sum` SSOT（protocol.rs:35）：ACP 侧为 None、verifier 侧有值时自然求和，无需特判。
 - validate 规则与 claude 的 verify 校验对齐（既有规则适用什么就沿用什么）。
 - `skill` 字段不加：skill 注入是 claude CLI 专属机制，ACP 协议无对应物。
@@ -67,7 +69,7 @@ allow_unmetered: true   # 我知道 acp step 不计入 budget,仍要跑
 决策（b）：
 
 - manifest：`Acp` 变体增加 `#[serde(default)] on_permission: PermissionPolicy`（enum：`Reject`（default）/ `Ask`），旧 YAML 缺字段 = Reject = 现行为，向后兼容且 fail-closed。
-- runner API：`AcpRunner::run` 增加一个权限回调参数（与 `on_progress` 同风格，主线程调用）。worker 线程的 `on_receive_request` handler 不再直接回 Cancelled，而是把请求（工具名、agent 提供的 options 列表）经 std mpsc 发给主线程，并在 oneshot 上等答复；主线程 drain loop 里调回调拿决策后回填。`Reject` 策略下回调恒返回拒绝，行为与现状完全一致。
+- runner API：`AcpRunner::run` 增加一个权限回调参数（与 `on_progress` 同风格，主线程调用）。worker 线程的 `on_receive_request` handler 不再直接回 Cancelled，而是把请求（工具名、agent 提供的 options 列表）经 std mpsc 发给主线程，并在 `tokio::sync::oneshot` 上 `.await` 答复——**必须 await 而非阻塞式 recv**：worker 是 current-thread runtime，handler 里阻塞会连带冻结同一 `select!` 的 timeout / abort 分支，spec 承诺的墙钟兜底恰在权限等待路径失效。主线程 drain loop 里 try_recv 权限请求、调回调拿决策后经 oneshot 回填。`Reject` 策略下回调恒返回拒绝，行为与现状完全一致。
 - executor：`Ask` 策略时回调映射到既有 `decision_gate`（executor.rs:398，`GateKind::Decision`），suggestion 描述"agent 请求权限：<工具> / 选项：允许一次 / 拒绝 / 中止"：
   - Approve → 在 agent 提供的 options 里选 allow 类选项（优先一次性 allow；agent 未提供 allow 选项则回 Cancelled 并在 transcript 记一行）
   - Skip → `RequestPermissionOutcome::Cancelled`（拒绝该次请求，session 继续）
@@ -77,7 +79,7 @@ allow_unmetered: true   # 我知道 acp step 不计入 budget,仍要跑
 
 ### D4. agent registry
 
-- 新增 `<AGENTPIPE_HOME 或 ~/.agentpipe>/agents.toml`：
+- 新增 `base_dir()/agents.toml`。`base_dir()` = `$AGENTPIPE_HOME 或 $HOME` 拼 `/.agentpipe`——注意既有语义是 AGENTPIPE_HOME **替代 HOME**、`.agentpipe` 仍拼接（cli/main.rs:44-50 的 runs 目录同构），不是替代整个 `~/.agentpipe`。`runs_dir()` 目前是 cli crate 的 pub(crate)，需抽成 engine 公共 helper，供 runs / agents.toml / watch state 三处共用：
 
 ```toml
 [agents.gemini]
@@ -89,7 +91,7 @@ command = "npx @agentclientprotocol/claude-agent-acp"
 
 - manifest：`Acp.command` 从 `String` 改为 `Option<String>`。解析优先级：step 内联 `command` > registry 按 `agent` 名查找 > 校验错误（错误信息提示两条出路）。既有 YAML 都带 command，不受影响。
 - registry 文件不存在 = 空表（仅使用内联 command 的用户无感知）；文件存在但 TOML 解析失败 = fail-loud 报错，不静默当空表（防"改了 registry 没生效"的静默漂移）。
-- 查找发生在 validate / 执行前（与 manifest 校验同期），跑到一半才发现 agent 缺失是不可接受的错误路径。
+- 解析是独立 pre-pass：`resolve_agents(&mut manifest, &registry)` 在 CLI / Tauri 加载 manifest 后、构造 Executor 前调用，把 registry 命中回填进 step 的 command。`Manifest::validate` 保持纯函数、无文件系统依赖（`Executor::try_new` 的二次 validate 行为不变），只校验"command 为 None → 可解释报错并提示两条出路"。跑到一半才发现 agent 缺失是不可接受的错误路径。
 - Phase 2（可选）：`agentpipe agents` 子命令列出 registry 内容，非必需。
 
 ### D5. transcript 渲染
@@ -104,6 +106,8 @@ command = "npx @agentclientprotocol/claude-agent-acp"
 - registry TOML 坏 → fail-loud Err；registry 缺条目且无内联 command → validate Err。
 - permission Ask 下 agent 不提供任何 allow 选项 → Approve 退化为 Cancelled + transcript 记录（不 panic、不挂死）。
 - permission 门等待期间用户 Abort / Control 中止 → 走既有 abort 通路，oneshot 发送端 drop，worker 侧收到关闭即回 Cancelled 后退出。
+- 反方向：门等待期间 worker 侧墙钟超时先到 → oneshot 接收端 drop，人随后的应答回填失败——定义为忽略 + transcript 记一行，step 终态以 worker 侧超时 Err 为准（不静默吞、不 panic）。
+- 已知边界（记录，非回归）：门等待期间主线程 drain loop 暂停，仅翻 Control 标志、不走 Command 通道的嵌入方在此期间无法中止 run——与既有 human / decision 门行为一致。
 - verify-retry 中 ACP step 反复失败 → 与 claude 路径同形，走 OnUnmet 语义，无新分支。
 
 ## 6. 测试

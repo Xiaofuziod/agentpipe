@@ -38,10 +38,10 @@
   body:
     - id: rev_sec
       kind: claude
-      prompt: "以安全视角评审 {{mr.artifact}},末行输出 verdict: pass 或 verdict: fail"
+      prompt: "以安全视角评审 {{mr.artifact}},末行输出 VERDICT: pass 或 VERDICT: fail"
     - id: rev_perf
       kind: claude
-      prompt: "以性能视角评审 {{mr.artifact}},末行输出 verdict: pass 或 verdict: fail"
+      prompt: "以性能视角评审 {{mr.artifact}},末行输出 VERDICT: pass 或 VERDICT: fail"
     - id: rev_codex
       kind: codex
       action: review-mr
@@ -53,9 +53,10 @@
 - `std::thread::scope` 内为每个子步骤起线程，简单信号量限并发（`max_concurrency` 默认 4，防子进程打满机器）。
 - 产物合并：子线程不写共享状态，各自返回 `(step_id, artifact, metrics, result)`，scope join 后由主线程按 body 顺序串行合并进 context（并发默认不安全 → join 后串行写，沿旧设计 D6）。
 - 事件：`Event` 的 sender 可 clone 到子线程；`StepStarted` / `StepProgress` / `StepFinished` 天然带 step_id，NDJSON 审计消费端是单 receiver 串行写，交错安全。CLI 渲染给并发期间的 progress 行加 step_id 前缀；GUI 并排多列（旧设计 §5 的 RunPanel 决策沿用）。
-- 取消：`Control` 是 Send + Sync（AtomicBool + Mutex），引用传进每个子线程；abort 时各 runner 沿用自己的 SIGTERM → killpg 套路，scope 等全部子线程退出后统一收尾。
+- 取消（**前置改动，必须先落**）：`Control` 现状是单槽 pgid 登记（control.rs 的 `Mutex<Option<u32>>`，runner/mod.rs 的 `set_current` 是唯一写入点），N 个并发 runner 共享时后来者覆盖前者、先结束者清掉别人的登记，abort 最多杀掉一个子进程组；且 claude / codex runner 的等待循环不轮询 `is_aborted`，漏杀的子进程只能等自然跑完。本设计前置改动：pgid 登记改多槽位（`Mutex<HashSet<u32>>` + register / unregister，kill 时遍历 killpg），信号沿用现状 SIGKILL（仓库无 SIGTERM 分级，不新造）。改完后 abort = 翻标志 + 遍历杀全部登记 pgid，scope 等全部子线程退出后统一收尾。
+- 写隔离：parallel body 的子步骤强制只读——claude 子步骤走既有 `read_only=true`（plan 模式，校验期强制而非约定）；codex review 本就只读；acp 子步骤无引擎级只读机制，靠 prompt 层约束 + 文档显式声明（残余风险记入 §5）。理由：多个 bypassPermissions 的 agent 并发写同一 cwd/worktree，git index 与文件互踩是真实竞态，"评审各自独立"不能只是 prompt 期望。写操作留给 parallel 之后的串行步骤。
 - 失败语义（fail-closed）：任一子步骤失败不立即杀兄弟（评审各自独立，杀了浪费已花成本），等全部结束后：若有失败子步骤，parallel step 整体走失败路径进决策门（重试 / 跳过 / 中止），产物中已成功的子步骤保留可引用。
-- budget：子步骤 metrics 在 join 后统一 `charge_and_check`；并发期间不做轮间预算检查（成本粒度是 step 级，与现状一致）。检查时机后置意味着并发批次可能整体超一次预算，文档注明——预算是兜底不是精确闸门。
+- budget：子步骤 metrics 在 join 后逐个 `charge` + 一次 `check_budget`（`charge_and_check` 已拆分为这两个函数，executor.rs:740 附近，按新名实现）；并发期间不做轮间预算检查（成本粒度是 step 级，与现状一致）。检查时机后置意味着并发批次可能整体超一次预算，文档注明——预算是兜底不是精确闸门。
 - gated 模式（RunMode 逐步门控）：门控发生在 parallel step 整体进入前（一次 GateKind::Step），body 子步骤不再逐个门控——并发中的逐步暂停语义与交互门排斥规则同因（见 §3 非目标末条）。
 
 ### D2. StepKind::Aggregate
@@ -64,13 +65,13 @@
 - id: verdict
   kind: aggregate
   inputs: [rev_sec, rev_perf, rev_codex]
-  strategy: vote            # concat | vote,缺省 concat(fail-closed 最保守)
+  strategy: vote            # concat | vote,缺省 concat
 ```
 
-- concat：按 id 标注拼接各 input 产物为一段文本。零 agent 成本，是缺省。
+- concat：按 id 标注拼接各 input 产物为一段文本。零 agent 成本，是缺省。注意 concat 是"弃权"不是把关——它不做任何裁决、永不拦截，等价于不装门；需要拦截效果必须显式选 vote（真正 fail-closed 的是 vote 的解析失败充 fail）。
 - vote：从每份 input 提取一票：
   - codex review 子步骤：直接用结构化 `ReviewResult.verdict`（clean = pass），不走文本解析——这是相对旧设计的升级，2026-06-26 落的 verdict 结构化直接受益。
-  - claude / acp 子步骤：解析产物末行 `verdict: pass|fail` 标记；解析失败按 fail（fail-closed，沿旧设计）。ACP 参与投票的脆弱性由多数决 + fail-closed 解析兜底（路线图 §4 的例外条款）。
+  - claude / acp 子步骤：解析 `VERDICT: pass|fail` 标记——sentinel 方言与解析函数复用既有 claude verifier 的 `parse_verdict`（executor.rs:828 附近，SSOT，不另造小写方言）；解析失败按 fail（fail-closed，沿旧设计）。ACP 参与投票的脆弱性由多数决 + fail-closed 解析兜底（路线图 §4 的例外条款）。
   - 裁决：pass 票严格过半 → pass；平票 / 不足 → fail。产物 = 裁决结果 + 逐票明细（含"哪票是解析失败充 fail"，可解释）。
 - 校验：`inputs` 非空、引用的 id 必须存在于此前步骤（含 parallel body 内的子 id）；strategy 未知值拒绝。
 - aggregate 自身是纯计算步骤，无 agent 成本、无 metrics。
@@ -85,6 +86,7 @@ MVP 中 parallel / aggregate 可放进 loop body，但 `until` 收敛仍只认 c
 - 子线程 panic → scope join 时捕获，按该子步骤失败处理，不拖垮进程。
 - 全部子步骤失败 → parallel 整体失败进决策门。
 - vote 全票解析失败 → 全 fail → 裁决 fail（不放行），明细里逐票标注原因。
+- acp 子步骤的只读约束仅在 prompt 层（无引擎级机制），属已知残余风险：文档声明 + 建议 parallel body 优先用 claude（read_only 强制）/ codex（天然只读）承担评审。
 - abort 竞态：abort 到达时部分子步骤已完成 → 已完成产物照常合并落审计，未完成的走各 runner abort 路径，parallel 以 Aborted 收尾。
 
 ## 6. 测试

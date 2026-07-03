@@ -8,7 +8,7 @@
 //!
 //! 验证:initialize 握手成功 + prompt 拿到非空 answer。不验内容(模型回复非确定)。
 
-use agentpipe_engine::runner::acp::{AcpConfig, AcpRunner};
+use agentpipe_engine::runner::acp::{AcpConfig, AcpRunner, PermissionMode};
 
 fn smoke_command() -> String {
     std::env::var("AGENTPIPE_ACP_SMOKE_CMD")
@@ -44,6 +44,7 @@ fn real_agent_smoke() {
             None,
             &mut |line, _round| progress.push(line.to_string()),
             &cwd,
+            PermissionMode::Reject,
         )
         .expect("真实 agent 应当返回 answer");
     eprintln!("acp smoke: answer={:?}", outcome.answer);

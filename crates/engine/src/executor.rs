@@ -167,7 +167,13 @@ impl Executor {
                             command: (*command).to_string(),
                         });
                         runner
-                            .run(&p, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd)
+                            .run(
+                                &p,
+                                Some(self.control.as_ref()),
+                                &mut on_line,
+                                &self.ctx.cwd,
+                                crate::runner::acp::PermissionMode::Reject,
+                            )
                             .map(|out| (out.answer, out.metrics))
                             .map_err(|e| e.to_string())
                     }

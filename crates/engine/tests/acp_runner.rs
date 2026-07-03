@@ -66,6 +66,7 @@ fn run_scenario_full(
             control,
             &mut |line, _round| progress.push(line.to_string()),
             &cwd,
+            agentpipe_engine::runner::acp::PermissionMode::Reject,
         )
         .map_err(|e| format!("{e:?}"));
     (res, progress)
@@ -73,6 +74,31 @@ fn run_scenario_full(
 
 fn run_scenario(scenario: &str, prompt: &str) -> Result<AcpOutcome, String> {
     run_scenario_full(scenario, prompt, 30, None).0
+}
+
+fn run_scenario_perm(
+    scenario: &str,
+    cb: &mut dyn FnMut(&str) -> agentpipe_engine::runner::acp::PermissionDecision,
+) -> Result<AcpOutcome, String> {
+    let command = mock_command();
+    let full_cmd = format!("env MOCK_ACP_SCENARIO={scenario} {command}");
+    let runner = AcpRunner::with_timeout(
+        AcpConfig {
+            agent: format!("mock-{scenario}"),
+            command: full_cmd,
+        },
+        30,
+    );
+    let cwd = std::env::current_dir().unwrap();
+    runner
+        .run(
+            "go",
+            None,
+            &mut |_l, _r| {},
+            &cwd,
+            agentpipe_engine::runner::acp::PermissionMode::Ask(cb),
+        )
+        .map_err(|e| format!("{e:?}"))
 }
 
 #[test]
@@ -175,6 +201,69 @@ fn fs_reverse_request_is_rejected_without_hang() {
     let (res, _progress) = run_scenario_full("fs_probe", "probe", 30, None);
     let outcome = res.expect("fs_probe 场景应当成功(反向请求被拒不影响主流程)");
     assert_eq!(outcome.answer, "ok", "反向请求被拒后 agent 仍能完成 prompt");
+}
+
+#[test]
+fn permission_reject_mode_yields_denied() {
+    // 缺省 Reject 模式:与旧行为一致,agent 收 Cancelled。
+    let out = run_scenario("permission_probe", "go").expect("应正常完成");
+    assert_eq!(out.answer, "denied");
+}
+
+#[test]
+fn permission_ask_approve_yields_granted() {
+    use agentpipe_engine::runner::acp::PermissionDecision;
+    let mut asked = Vec::new();
+    let out = run_scenario_perm("permission_probe", &mut |desc| {
+        asked.push(desc.to_string());
+        PermissionDecision::Approve
+    })
+    .expect("应正常完成");
+    assert_eq!(out.answer, "granted");
+    assert_eq!(asked.len(), 1, "回调应被调用一次");
+}
+
+#[test]
+fn permission_ask_reject_yields_denied() {
+    use agentpipe_engine::runner::acp::PermissionDecision;
+    let out = run_scenario_perm("permission_probe", &mut |_| PermissionDecision::RejectOnce)
+        .expect("应正常完成");
+    assert_eq!(out.answer, "denied");
+}
+
+#[test]
+fn permission_ask_approve_without_allow_option_falls_back_cancelled() {
+    use agentpipe_engine::runner::acp::PermissionDecision;
+    // spec §6 第五条路径:批准但 agent 未提供 allow 选项 → 回 Cancelled,agent 视角=denied。
+    let out = run_scenario_perm("permission_probe_noallow", &mut |_| {
+        PermissionDecision::Approve
+    })
+    .expect("应正常完成(回退 Cancelled 不是错误)");
+    assert_eq!(out.answer, "denied");
+    assert!(
+        out.full_transcript.contains("未提供 allow 选项"),
+        "transcript 必须记录回退原因: {}",
+        out.full_transcript
+    );
+}
+
+#[test]
+fn permission_ask_abort_aborts_run() {
+    use agentpipe_engine::runner::acp::PermissionDecision;
+    // slow 变体:agent 回 chunk 后拖 10s 才 EndTurn → abort 分支确定性先赢。
+    let err = run_scenario_perm("permission_probe_slow", &mut |_| PermissionDecision::Abort)
+        .expect_err("Abort 决策必须中止 run");
+    assert!(err.contains("中止"), "{err}");
+}
+
+#[test]
+fn permission_ask_abort_wins_even_if_agent_finishes_quickly() {
+    use agentpipe_engine::runner::acp::PermissionDecision;
+    // 快速变体:agent 收 Cancelled 后马上回 chunk + EndTurn。Abort 决策必须仍然强制中止,
+    // 不能竞态成一次普通拒绝后的成功完成。
+    let err = run_scenario_perm("permission_probe", &mut |_| PermissionDecision::Abort)
+        .expect_err("Abort 决策必须中止 run");
+    assert!(err.contains("中止"), "{err}");
 }
 
 #[test]

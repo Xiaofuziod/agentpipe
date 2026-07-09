@@ -114,7 +114,7 @@ fn verify_once(&self, v: &Verify, on_line: &mut dyn FnMut(&str, Option<u32>)) ->
 
 复用要点:
 
-- **不新写 spawn 逻辑**。`runner::run_command(bin, args, cwd, stdin, timeout, control, on_line)` 已返回 `(stdout: String, success: bool)`,且内部已做:独立进程组 + `control.set_current` 登记 pgid + spawn 后补查 abort + 行回调。command verifier 只是它的一个调用点。
+- **不新写 spawn 逻辑**。`runner::run_command(bin, args, cwd, stdin, timeout, control, on_line)` 当时返回 `(stdout: String, success: bool)`(2026-07-10 起改为 `CommandOutput`),且内部已做:独立进程组 + `control.set_current` 登记 pgid + spawn 后补查 abort + 行回调。command verifier 只是它的一个调用点。
 - **判据**:`success`(= 子进程 `status.success()`,即 exit 0)→ `Clean`;否则 → `ChangesRequested`,findings = 输出尾部(`tail(out, 4096)`,≤4KB);spawn/IO 失败 → `Err` → `ChangesRequested`(fail-closed)。被信号杀死时 `run_command` 返回 `success=false`,同样判未达成。
 - **可中断**:传 `Some(self.control.as_ref())` 即获得与 `claude.run`/`codex.review` 完全一致的 abort-kill 能力(`cargo test` 这类长命令可被宿主 Abort 杀掉整组)。
 - **stderr**:`2>&1` 合并进 stdout 后,既进 findings 又经 `on_line` 实时显示;无需扩 `run_command`(它当时 stderr 是 inherit,不捕获)。

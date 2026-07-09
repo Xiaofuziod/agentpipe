@@ -99,12 +99,18 @@ pub fn run_command(
         let mut buf = [0u8; 4096];
         loop {
             match src.read(&mut buf) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break, // EOF
                 Ok(n) => {
                     if err_tx.send(buf[..n].to_vec()).is_err() {
                         break;
                     }
                 }
+                // 被信号打断不是 EOF:`ChildStderr::read` 直接透传 libc::read,不重试 EINTR。
+                // 当成致命会让本线程停止排空 → 子进程写满 stderr 管道后阻塞,正是本修复要
+                // 消除的死法。stdout 侧走 BufReader::lines(内部 read_until 对 Interrupted
+                // 续读)天然免疫,两边必须同构。
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
             }
         }
     });

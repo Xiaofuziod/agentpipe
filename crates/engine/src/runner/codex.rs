@@ -1,4 +1,4 @@
-use super::run_command;
+use super::{run_command, stderr_hint, CommandOutput};
 use crate::control::Control;
 use crate::context::{Severity, Verdict};
 use crate::error::EngineError;
@@ -102,8 +102,9 @@ impl CodexRunner {
         let schema = write_schema()?;
 
         // 全部走通用 `codex exec` + 严格 --output-schema 拿结构化 verdict。
-        // 注:实测 codex v0.139.0 把最终结构化结果打到 stdout、并不写 -o(--output-last-message)
-        // 文件,故下方以 stdout 为主、-o 为 fallback(`codex exec review` 子命令的 -o 写散文,弃用)。
+        // 注:codex v0.139.0 只把最终结构化结果打到 stdout、不写 -o(--output-last-message);
+        // v0.144.0 实测两边都写。故下方以 stdout 为主、-o 为 fallback,兼容两代
+        // (`codex exec review` 子命令的 -o 写散文,弃用)。
         // review-doc 把文档内容经 stdin 喂给 codex(spec 7.2);其余 action 无 stdin。
         // vet 开启时同步构造 VetScope:核验是全新 codex exec 进程,主审查的范围
         // (base 分支 / 文档内容)必须重申,否则核验无从判断 finding 是否属于本次
@@ -192,13 +193,27 @@ impl CodexRunner {
             ),
         };
 
-        // 非超时的非零退出不在此拦截:落到下方解析 fallback(ChangesRequested 兜底),
-        // 与 vet_pass 的 fail-closed Err 语义有意不同(那边替换首轮结果,必须可判别失败)。
-        let (stdout, _success) = self.run_codex(&args, stdin.as_deref(), "审查", control, on_progress, cwd)?;
-        // 真实 codex(v0.139.0)把最终结构化结果打到 stdout、不写 -o(--output-last-message)文件。
-        // 故 stdout 优先:取最后一条能解析成 schema 的 JSON 行;读 -o 文件作 fallback
-        // (stub / 旧 codex 路径,parse_review 自带"无法解析"兜底)。
-        let mut result = parse_review_stdout(&stdout).unwrap_or_else(|| parse_review(&out_file));
+        let out = self.run_codex(&args, stdin.as_deref(), "审查", control, on_progress, cwd)?;
+        // codex 把最终结构化结果打到 stdout(0.144 起同时也写 -o)。
+        // 故 stdout 优先:取最后一条能解析成 schema 的 JSON 行;读 -o 文件作 fallback。
+        let parsed = parse_review_stdout(&out.stdout).or_else(|| parse_review_file(&out_file));
+        // 退出码只在「拿不到任何可解析结果」时才有裁决权:
+        // - 解析成功 → 采用,不因非零退出丢弃一份已到手的 verdict。
+        // - 解析失败 + 退出 0 → 输出格式坏了,保持 fallback(ChangesRequested,fail-closed)。
+        // - 解析失败 + 非零退出 → 进程本身崩了/没跑成,fail-loud 抛错走 step 失败决策门。
+        //   此前这里把两者压成同一个 fallback:codex 崩溃被伪装成 changes_requested,
+        //   until:codex-clean 永不收敛,fix 步骤拿着"(无法解析 Codex 输出)"这条空 finding
+        //   在真实仓库自主写码,一路烧到 loop max(实测,见 spec)。
+        let mut result = match parsed {
+            Some(r) => r,
+            None if !out.success => {
+                return Err(EngineError::Cli(format!(
+                    "Codex 审查进程异常退出,且没有产出可解析的结构化输出{}",
+                    stderr_hint(&out.stderr_tail)
+                )));
+            }
+            None => parse_failed_result(),
+        };
 
         // 合法解析出 changes_requested 却零条目:模型自相矛盾的输出(schema 不禁止),
         // 与解析失败在收敛判定上同样保守,但根因不同 —— 显式提示避免用户把它误判成
@@ -263,15 +278,17 @@ impl CodexRunner {
             scope.scope, first.findings
         );
         let args = schema_exec_args(schema, out_str, prompt);
-        let (stdout, success) =
-            self.run_codex(&args, scope.stdin.as_deref(), "核验", control, on_progress, cwd)?;
+        let out = self.run_codex(&args, scope.stdin.as_deref(), "核验", control, on_progress, cwd)?;
         // vet 与 review 主路径的失败语义有意不同:核验的任何失败(非零退出 / 不可解析)
         // 都必须是可判别的 Err,让 caller 保留首轮结果;绝不能走"无法解析"占位符 fallback
         // 抹掉真实 findings。
-        if !success {
-            return Err(EngineError::Cli("Codex 核验进程非零退出".into()));
+        if !out.success {
+            return Err(EngineError::Cli(format!(
+                "Codex 核验进程非零退出{}",
+                stderr_hint(&out.stderr_tail)
+            )));
         }
-        parse_review_stdout(&stdout)
+        parse_review_stdout(&out.stdout)
             .or_else(|| parse_review_file(&out_file))
             .ok_or_else(|| EngineError::Cli("Codex 核验输出不可解析".into()))
     }
@@ -290,11 +307,11 @@ impl CodexRunner {
         control: Option<&Control>,
         on_progress: &mut dyn FnMut(&str, Option<u32>),
         cwd: &Path,
-    ) -> Result<(String, bool), EngineError> {
+    ) -> Result<CommandOutput, EngineError> {
         // codex exec 输出非 NDJSON 协议,原始行直接作无轮次进度上报(round=None)。
         let mut raw_sink = |line: &str| on_progress(line, None);
         let started = std::time::Instant::now();
-        let (stdout, success) = run_command(
+        let out = run_command(
             &self.bin,
             args,
             cwd,
@@ -303,13 +320,14 @@ impl CodexRunner {
             control,
             &mut raw_sink,
         )?;
-        if !success && started.elapsed() >= std::time::Duration::from_secs(self.timeout_secs) {
+        if !out.success && started.elapsed() >= std::time::Duration::from_secs(self.timeout_secs) {
             return Err(EngineError::Cli(format!(
-                "Codex {label}超时(>{}s),已中止",
-                self.timeout_secs
+                "Codex {label}超时(>{}s),已中止{}",
+                self.timeout_secs,
+                stderr_hint(&out.stderr_tail)
             )));
         }
-        Ok((stdout, success))
+        Ok(out)
     }
 }
 
@@ -525,14 +543,16 @@ fn parse_review_file(out_file: &Path) -> Option<ReviewResult> {
     serde_json::from_str::<RawReview>(content.trim()).ok().map(raw_to_result)
 }
 
-fn parse_review(out_file: &Path) -> ReviewResult {
-    parse_review_file(out_file).unwrap_or_else(|| ReviewResult {
+/// 输出解析失败(但进程正常退出)时的 fail-closed 结果:当作 changes_requested,
+/// 绝不静默判过。进程本身失败不走这里 —— 那是 Err,见 review() 的退出码裁决。
+fn parse_failed_result() -> ReviewResult {
+    ReviewResult {
         verdict: Verdict::ChangesRequested,
         findings: "(无法解析 Codex 输出,按需修改处理)".into(),
         items: vec![],
         parse_failed: true,
         metrics: None,
-    })
+    }
 }
 
 // 必须是严格 JSON Schema:OpenAI 结构化输出要求每个 object 带 additionalProperties:false

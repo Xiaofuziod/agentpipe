@@ -857,8 +857,10 @@ fn command_verdict(
         Some(control),
         on_line,
     ) {
-        Ok((_, true)) => (Verdict::Clean, String::new()),
-        Ok((out, false)) => (Verdict::ChangesRequested, tail(&out, 4096)),
+        // `2>&1` 已把子进程 stderr 并进 stdout 管道,故 findings 取 stdout 尾部即可
+        // (CommandOutput::stderr_tail 在这条路径上恒为空)。
+        Ok(out) if out.success => (Verdict::Clean, String::new()),
+        Ok(out) => (Verdict::ChangesRequested, tail(&out.stdout, 4096)),
         Err(e) => (Verdict::ChangesRequested, format!("校验执行失败: {e}")),
     }
 }

@@ -1,4 +1,4 @@
-use super::run_command;
+use super::{run_command, stderr_hint};
 use crate::control::Control;
 use crate::error::EngineError;
 use crate::protocol::StepMetrics;
@@ -74,7 +74,7 @@ impl ClaudeRunner {
         let mut parser = StreamParser::new();
         let started = std::time::Instant::now();
         // 用块限定 raw_sink 的借用,使其在 run_command 返回后立即释放 parser/on_progress。
-        let (stdout, success) = {
+        let out = {
             let mut raw_sink = |raw: &str| {
                 if let Some(turn) = parser.feed(raw) {
                     on_progress(&turn.label, Some(turn.round));
@@ -82,21 +82,25 @@ impl ClaudeRunner {
             };
             run_command(&self.bin, &args, cwd, None, Some(self.timeout_secs), control, &mut raw_sink)?
         };
-        if !success {
+        if !out.success {
             // 超时:run_command 到点 killpg 返回 success=false,用墙钟区分超时与普通非零退出。
             // 两路都 fail-closed 为 Err → executor 走 step 失败决策门,挂死不会冻住整个 run。
             if started.elapsed() >= std::time::Duration::from_secs(self.timeout_secs) {
                 return Err(EngineError::Cli(format!(
-                    "claude 步骤超时(>{}s),已中止",
-                    self.timeout_secs
+                    "claude 步骤超时(>{}s),已中止{}",
+                    self.timeout_secs,
+                    stderr_hint(&out.stderr_tail)
                 )));
             }
-            return Err(EngineError::Cli("claude 非零退出".into()));
+            return Err(EngineError::Cli(format!(
+                "claude 非零退出{}",
+                stderr_hint(&out.stderr_tail)
+            )));
         }
         Ok(ClaudeOutcome {
             answer: parser.answer(),
             metrics: parser.metrics(),
-            full_output: stdout,
+            full_output: out.stdout,
         })
     }
 }

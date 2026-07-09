@@ -393,3 +393,47 @@ fn vet_not_triggered_on_clean() {
                           None, &mut |_l, _r| {}, Path::new(".")).unwrap();
     assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
 }
+
+/// codex 在吐出最终结构化消息前崩溃(真实场景:stderr EAGAIN → panic)。
+/// 此前 run_codex 丢弃退出码,崩溃被 parse_review 兜成 changes_requested +
+/// "(无法解析 Codex 输出)",loop until:codex-clean 永不收敛,fix 步骤拿着空 finding
+/// 在真实仓库自主写码烧到 max。必须 fail-loud 让 executor 走 step 失败决策门。
+#[test]
+fn nonzero_exit_without_parsable_output_fails_loud_carrying_stderr() {
+    let err = CodexRunner::new(fixture("stub-codex-crash.sh"))
+        .review(
+            &CodexAction::ReviewMr,
+            None,
+            Some("HEAD"),
+            None,
+            false,
+            None,
+            &mut |_: &str, _: Option<u32>| {},
+            &PathBuf::from("."),
+        )
+        .expect_err("codex 崩溃必须 fail-loud,不能伪装成一份审查结论");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("codex boom"),
+        "错误必须携带 codex stderr 尾部,否则用户永远看不到根因: {msg}"
+    );
+}
+
+/// 退出码非零、但 stdout 已有合法 verdict:不因退出码丢弃已拿到的结果。
+/// 守护「解析成功优先于退出码」这条边界,避免收紧退出码时误伤。
+#[test]
+fn nonzero_exit_with_parsable_stdout_keeps_verdict() {
+    let r = CodexRunner::new(fixture("stub-codex-nonzero-json.sh"))
+        .review(
+            &CodexAction::ReviewMr,
+            None,
+            Some("HEAD"),
+            None,
+            false,
+            None,
+            &mut |_: &str, _: Option<u32>| {},
+            &PathBuf::from("."),
+        )
+        .expect("stdout 有合法 verdict 时不该因退出码丢弃");
+    assert_eq!(r.verdict, Verdict::Clean);
+}

@@ -37,7 +37,7 @@ pub struct CommandOutput {
 
 /// spawn 一个命令,返回 [`CommandOutput`]。黑盒:不解析协议,只收文本。
 ///
-/// - `stdin`:有则经管道喂入(写完即关闭 → EOF);无则置 null。
+/// - `stdin`:有则经管道喂入,由独立线程写(写完即关闭 → EOF);无则置 null。
 /// - `timeout_secs`:有则到点 kill 并以 success=false 返回。
 /// - `control`:有则把子进程放进独立进程组并登记 pgid,供宿主 Abort 杀整组;返回前清空。
 /// - `on_line`:每读到一行 stdout 即回调一次(实时进度);仅转发文本,不解析协议。
@@ -119,12 +119,6 @@ pub fn run_command(
         }
     }
 
-    if let Some(s) = stdin {
-        if let Some(mut si) = child.stdin.take() {
-            let _ = si.write_all(s.as_bytes());
-        } // si 在此 drop → 子进程收到 EOF
-    }
-
     // reader 线程按行读 stdout,经 channel 送回(避免管道缓冲写满死锁)。
     let (line_tx, line_rx) = mpsc::channel::<String>();
     let reader = std::thread::spawn(move || {
@@ -140,6 +134,21 @@ pub fn run_command(
             }
         }
     });
+
+    // stdin 必须在两个 reader 就位之后、且在独立线程里写:
+    // ① 早于 reader 写 → 子进程灌满 stdout(64KB)后阻塞在 write,宿主又阻塞在 write stdin,
+    //    两条管道各自写满、互等 → 死锁(review-doc 把整份文档经 stdin 喂给 codex,会撞上)。
+    // ② 留在主线程写 → 子进程若迟迟不读 stdin,主线程卡在 write_all 里,连自己的超时轮询
+    //    与 abort kill 都进不去。
+    // 写完即 drop 管道 → 子进程收到 EOF;子进程提前退出时 write 拿到 EPIPE,忽略即可。
+    if let Some(s) = stdin {
+        if let Some(mut si) = child.stdin.take() {
+            let data = s.to_owned();
+            std::thread::spawn(move || {
+                let _ = si.write_all(data.as_bytes());
+            });
+        }
+    }
 
     let mut full = String::new();
     let drain = |rx: &mpsc::Receiver<String>, full: &mut String, on_line: &mut dyn FnMut(&str)| {

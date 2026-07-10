@@ -59,6 +59,11 @@ pub enum StepKind {
         base: Option<String>,
         #[serde(default)]
         prompt: Option<String>,
+        /// review-mr 的 git pathspec 排除项(如 `**/vendor/**`、`docs/plans/`)。
+        /// 默认空 = 审全部,与该字段引入前行为逐字一致 —— 漏审是安全风险,默认值里
+        /// 不藏静默缩小范围。推荐清单见 templates/mr-review-loop.yaml。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude: Vec<String>,
         /// 可选自反驳核验:review 结果非 clean 时追加一次 read-only codex 调用,
         /// 逐条用代码证据复核 findings,误报在喂给下游 fixer 前被过滤。
         /// 仅 review-mr / review-doc;ask 配 vet 被 validate 拒绝。
@@ -266,8 +271,17 @@ impl Manifest {
                 }
                 Ok(())
             }
-            StepKind::Codex { action, path, base, prompt, vet } => {
+            StepKind::Codex { action, path, base, prompt, exclude, vet } => {
                 Self::validate_codex_fields(&step.id, "codex", action, path, base, prompt)?;
+                // exclude 只对 review-mr 的 `git diff` 有意义。配在别的 action 上会被
+                // 静默忽略 —— 那等于让用户以为排除生效了。fail-loud。
+                if !exclude.is_empty() && *action != CodexAction::ReviewMr {
+                    return Err(EngineError::Validation(format!(
+                        "step '{}': exclude 仅支持 review-mr(它是 `git diff` 的 pathspec);\
+                         review-doc / ask 没有 diff 范围可排除",
+                        step.id
+                    )));
+                }
                 if *vet && *action == CodexAction::Ask {
                     return Err(EngineError::Validation(format!(
                         "step '{}': vet 仅支持 review-mr / review-doc(ask 无结构化 findings 可核)",

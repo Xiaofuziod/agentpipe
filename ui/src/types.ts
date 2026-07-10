@@ -17,7 +17,7 @@ export type Verify = {
 
 export type StepKind =
   | { kind: "claude"; prompt: string; skill?: string; verify?: Verify }
-  | { kind: "codex"; action: CodexAction; path?: string; base?: string; prompt?: string; vet?: boolean }
+  | { kind: "codex"; action: CodexAction; path?: string; base?: string; prompt?: string; exclude?: string[]; vet?: boolean }
   | { kind: "human"; instruction: string; expects?: string; value?: string }
   | { kind: "loop"; until: "codex-clean"; max: number; body: Step[]; allow_residual?: "nit" | "minor" | "major" }
   | { kind: "acp"; agent: string; command: string; prompt: string };

@@ -75,6 +75,7 @@ impl CodexRunner {
 
     /// 返回 ReviewResult。解析失败一律 fail-closed 为 ChangesRequested。
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn review(
         &self,
         action: &CodexAction,
@@ -82,6 +83,8 @@ impl CodexRunner {
         base: Option<&str>,
         ask_prompt: Option<&str>,
         vet: bool,
+        // review-mr 的 git pathspec 排除项;其余 action 忽略。空 = 审全部(默认)。
+        exclude: &[String],
         control: Option<&Control>,
         on_progress: &mut dyn FnMut(&str, Option<u32>),
         cwd: &Path,
@@ -140,9 +143,14 @@ impl CodexRunner {
                          且目标仓库已 fetch 到该分支。"
                     )));
                 }
+                // exclude 与 diff 命令同源:vet 是全新 codex 进程,它判定"finding 是否属于
+                // 本次审查范围"用的必须是同一条命令。两处漂移会让 vet 拿全量范围去核验
+                // 一份缩小范围的 findings,反之亦然。
+                validate_exclude(exclude)?;
+                let diff_cmd = diff_command(b, exclude);
                 let scope = vet.then(|| VetScope {
                     scope: format!(
-                        "核验对象:当前工作区相对 `{b}` 分支的代码改动(git diff {b}...HEAD 以及未提交改动)。只核实属于该改动范围的 findings;范围之外的既有问题不属于本次审查,一律驳回。"
+                        "核验对象:当前工作区相对 `{b}` 分支的代码改动({diff_cmd} 以及未提交改动)。只核实属于该改动范围的 findings;范围之外的既有问题不属于本次审查,一律驳回。"
                     ),
                     stdin: None,
                 });
@@ -151,7 +159,7 @@ impl CodexRunner {
                         schema.clone(),
                         out_str.clone(),
                         format!(
-                            "审查当前工作区相对 `{b}` 分支的代码改动(查看 git diff {b}...HEAD 以及未提交改动),按 schema 输出 verdict(clean 或 changes_requested)和 findings{SUGGESTION_HINT}"
+                            "审查当前工作区相对 `{b}` 分支的代码改动(查看 {diff_cmd} 以及未提交改动),按 schema 输出 verdict(clean 或 changes_requested)和 findings{SUGGESTION_HINT}"
                         ),
                     ),
                     None,
@@ -321,8 +329,12 @@ impl CodexRunner {
             &mut raw_sink,
         )?;
         if !out.success && started.elapsed() >= std::time::Duration::from_secs(self.timeout_secs) {
+            // 可解释报错:大 diff 下 codex 逐文件读,实测每次工具调用约 6.7s,几百个文件
+            // 就会撞上默认 20 分钟。给出两条出路,而不是只说"超时了"。
             return Err(EngineError::Cli(format!(
-                "Codex {label}超时(>{}s),已中止{}",
+                "Codex {label}超时(>{}s),已中止。若目标 diff 很大,可调高 \
+                 AGENTPIPE_CODEX_TIMEOUT_SECS(秒),或用 codex step 的 `exclude` \
+                 排除 vendored / lock / 生成代码等无需审查的路径{}",
                 self.timeout_secs,
                 stderr_hint(&out.stderr_tail)
             )));
@@ -410,6 +422,53 @@ fn emit_findings_summary(result: &ReviewResult, on_line: &mut dyn FnMut(&str)) {
 ///   首行,这条是兜底)。
 ///
 /// `--end-of-options` 是 git 2.24+(2019),即便未来引入新选项也不混淆。
+/// shell 元字符:exclude 条目会被 codex 抄进 `git diff ... -- '<pat>'` 里执行,
+/// 单引号包裹只挡得住空白,挡不住引号闭合。任一出现即拒(白名单式思路的反面 —— 这里
+/// 用黑名单是因为 pathspec 合法字符集很宽(`*` `?` `[` `]` `/` `.` `:` 都要留),
+/// 而危险字符集小且封闭)。
+const EXCLUDE_FORBIDDEN: &[char] = &[
+    '\'', '"', '`', '$', ';', '&', '|', '<', '>', '(', ')', '{', '}', '\\', '!', '#', '\n', '\r',
+];
+
+/// 校验 exclude 条目。fail-loud:非法条目点名报错,不静默丢弃(丢弃 = 悄悄扩大审查
+/// 范围或悄悄缩小,两种都让用户对"审了什么"失去判断)。
+fn validate_exclude(exclude: &[String]) -> Result<(), EngineError> {
+    for pat in exclude {
+        let bad = |why: &str| {
+            Err(EngineError::Cli(format!(
+                "codex review 的 exclude 条目 {pat:?} 非法:{why}。\
+                 exclude 会被拼进 codex 执行的 `git diff` pathspec,必须是纯路径模式\
+                 (例:`**/vendor/**`、`docs/plans/`、`*.lock`)。"
+            )))
+        };
+        if pat.is_empty() {
+            return bad("空条目");
+        }
+        if pat.starts_with('-') {
+            return bad("以 `-` 开头会被 git 当作 option");
+        }
+        if pat.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return bad("含空白或控制字符");
+        }
+        if let Some(c) = pat.chars().find(|c| EXCLUDE_FORBIDDEN.contains(c)) {
+            return bad(&format!("含 shell 元字符 {c:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// 拼出让 codex 执行的 diff 命令。exclude 为空时逐字等于该特性引入前的命令。
+fn diff_command(base: &str, exclude: &[String]) -> String {
+    let mut cmd = format!("git diff {base}...HEAD");
+    if !exclude.is_empty() {
+        cmd.push_str(" --");
+        for pat in exclude {
+            cmd.push_str(&format!(" ':(exclude){pat}'"));
+        }
+    }
+    cmd
+}
+
 fn base_ref_resolvable(cwd: &Path, base: &str) -> bool {
     if base.starts_with('-') {
         return false;
@@ -615,5 +674,61 @@ mod tests {
         assert!(Severity::Nit < Severity::Minor);
         assert!(Severity::Minor < Severity::Major);
         assert!(Severity::Major < Severity::Critical);
+    }
+}
+
+#[cfg(test)]
+mod exclude_tests {
+    use super::*;
+
+    /// 回归:exclude 为空时 diff 命令必须与引入该特性之前逐字一致。
+    #[test]
+    fn empty_exclude_yields_todays_command_verbatim() {
+        assert_eq!(diff_command("main", &[]), "git diff main...HEAD");
+    }
+
+    #[test]
+    fn exclude_patterns_become_git_pathspec() {
+        let ex = vec!["**/vendor/**".to_string(), "**/package-lock.json".to_string()];
+        assert_eq!(
+            diff_command("main", &ex),
+            "git diff main...HEAD -- ':(exclude)**/vendor/**' ':(exclude)**/package-lock.json'"
+        );
+    }
+
+    /// exclude 条目会被 codex 抄进 shell 命令执行 —— 等同把用户输入送进 shell。
+    /// 每一类注入载荷都必须 fail-loud,且错误信息点名是哪一条。
+    #[test]
+    fn injection_payloads_are_rejected_fail_loud() {
+        let bad = [
+            "a'; rm -rf /; echo '",   // 引号闭合 + 命令注入
+            "$(whoami)",               // 命令替换
+            "`whoami`",                // 反引号
+            "a; whoami",               // 分号
+            "a | whoami",              // 管道
+            "a && whoami",             // 逻辑与
+            "a > /tmp/x",              // 重定向
+            "a\nwhoami",               // 换行
+            "a b",                     // 空白
+            "--upload-pack=x",         // 以 - 开头,会被 git 当 option
+            "",                        // 空串
+        ];
+        for pat in bad {
+            let err = validate_exclude(&[pat.to_string()])
+                .expect_err(&format!("必须拒绝: {pat:?}"));
+            let msg = err.to_string();
+            assert!(
+                msg.contains("exclude"),
+                "错误信息须点名 exclude 字段: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_pathspecs_are_accepted() {
+        let ok = ["**/vendor/**", "docs/plans/", "*.lock", "packages/x/generated"];
+        for pat in ok {
+            validate_exclude(&[pat.to_string()]).unwrap_or_else(|e| panic!("应接受 {pat:?}: {e}"));
+        }
     }
 }

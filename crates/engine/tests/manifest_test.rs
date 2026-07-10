@@ -272,3 +272,69 @@ fn codex_vet_absent_not_serialized() {
     let out = serde_yml::to_string(&m).unwrap();
     assert!(!out.contains("vet"), "false 不应序列化:\n{out}");
 }
+
+/// exclude 默认空:既有 manifest(不写该字段)照常解析,行为不变。
+#[test]
+fn codex_step_without_exclude_defaults_to_empty() {
+    let yaml = r#"
+version: 1
+name: t
+target: /tmp
+steps:
+  - id: review
+    kind: codex
+    action: review-mr
+    base: main
+"#;
+    let m = Manifest::parse(yaml).expect("should parse");
+    match &m.steps[0].kind {
+        StepKind::Codex { exclude, .. } => assert!(exclude.is_empty(), "默认必须审全部"),
+        other => panic!("expected codex, got {other:?}"),
+    }
+}
+
+#[test]
+fn codex_step_parses_exclude_list() {
+    let yaml = r#"
+version: 1
+name: t
+target: /tmp
+steps:
+  - id: review
+    kind: codex
+    action: review-mr
+    base: main
+    exclude:
+      - "**/vendor/**"
+      - "docs/plans/"
+"#;
+    let m = Manifest::parse(yaml).expect("should parse");
+    match &m.steps[0].kind {
+        StepKind::Codex { exclude, .. } => {
+            assert_eq!(exclude, &["**/vendor/**".to_string(), "docs/plans/".to_string()]);
+        }
+        other => panic!("expected codex, got {other:?}"),
+    }
+}
+
+/// exclude 配在 review-doc / ask 上会被静默忽略 —— 必须 fail-loud,
+/// 否则用户以为排除生效了。
+#[test]
+fn exclude_on_non_review_mr_is_rejected() {
+    let yaml = r#"
+version: 1
+name: t
+target: /tmp
+steps:
+  - id: ask
+    kind: codex
+    action: ask
+    prompt: hi
+    exclude:
+      - "**/vendor/**"
+"#;
+    let m = Manifest::parse(yaml).expect("should parse");
+    let err = m.validate().expect_err("exclude 配在 ask 上必须 fail-loud");
+    let msg = err.to_string();
+    assert!(msg.contains("exclude") && msg.contains("review-mr"), "错误应点名: {msg}");
+}

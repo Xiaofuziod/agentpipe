@@ -167,7 +167,7 @@ impl Executor {
         }
 
         match &step.kind {
-            StepKind::Codex { action, path, base, prompt, vet } => {
+            StepKind::Codex { action, path, base, prompt, exclude, vet } => {
                 // 标识符类字段(base 分支名 / 文件路径)走 interpolate_identifier:
                 // 模板用 {{xxx.artifact}} 动态解析时,LLM artifact 常带前后空白 / 多行 /
                 // 末尾换行(尤其指令"只输出 X"也未必严格遵守)。引擎统一 trim 取首行非空,
@@ -183,6 +183,7 @@ impl Executor {
                         base_i.as_deref(),
                         prompt_i.as_deref(),
                         *vet,
+                        exclude,
                         Some(self.control.as_ref()),
                         &mut on_line,
                         &self.ctx.cwd,
@@ -455,6 +456,10 @@ impl Executor {
                     base_i.as_deref(),
                     prompt_i.as_deref(),
                     false, // verify 门不做 vet(YAGNI):verify 已是校验语义,再核验校验属过度设计
+                    // verify 门暂不支持 exclude:它审的是「上一步是否达成目标」,范围通常
+                    // 远小于一次 MR review。若将来需要,应在 Verifier 上显式加字段,
+                    // 而不是让 step 的 exclude 隐式渗透过来(两者审查对象不同)。
+                    &[],
                     Some(self.control.as_ref()),
                     on_line,
                     &self.ctx.cwd,

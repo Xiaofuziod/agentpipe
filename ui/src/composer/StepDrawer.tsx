@@ -121,7 +121,15 @@ function Fields({
                 // vet 仅 review-mr/review-doc 支持,ask 配 vet 会被 validate 拒绝;
                 // GUI 无 vet 勾选框可关,切到 ask 时必须显式剥离,否则隐形携带的
                 // vet:true 会在保存/运行时才报错且无处修(F6)。
-                onChange({ ...step, action, vet: action === "ask" ? undefined : step.vet });
+                // exclude 同理,且更窄:它只对 review-mr 有意义(是 git diff 的 pathspec),
+                // 配在别的 action 上 validate 会拒。模板带 exclude 的 step 一旦被切走,
+                // GUI 同样没有控件能清掉它 —— 切换时一并剥离。
+                onChange({
+                  ...step,
+                  action,
+                  vet: action === "ask" ? undefined : step.vet,
+                  exclude: action === "review-mr" ? step.exclude : undefined,
+                });
               }}
             >
               <option value="review-mr">review-mr</option>

@@ -40,6 +40,17 @@ steps:
         kind: codex
         action: review-mr
         base: "{{base.artifact}}"  # 由上方 base step 从 MR 元信息动态解析,无需写死
+        # codex 逐文件读 diff,实测每次工具调用约 6.7s。把不值得审的路径排除掉,
+        # 才不会把预算(和 AGENTPIPE_CODEX_TIMEOUT_SECS,默认 1200s)烧在 lock 文件上。
+        # 引擎默认不排除任何路径(漏审是安全风险);这份清单是模板给的建议,按需增删。
+        exclude:
+          - "**/vendor/**"           # vendored 第三方代码,不是本次改动
+          - "**/package-lock.json"   # 锁文件
+          - "**/pnpm-lock.yaml"
+          - "**/Cargo.lock"
+          - "**/generated/**"        # 代码生成产物,改它要改生成器
+          - "docs/plans/**"          # 设计文档,不是代码
+          - "docs/specs/**"
 
       # 3 / 5. 把 Codex 找到的问题交给 Claude 修复并提交回该 MR 分支
       - id: fix

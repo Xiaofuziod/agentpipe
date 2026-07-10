@@ -26,7 +26,7 @@ fn parses_changes_requested() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "changes_requested");
     let r = stub()
-        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, &[], None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
         .expect("review ok");
     assert_eq!(r.verdict, Verdict::ChangesRequested);
     assert!(r.findings.contains("示例问题"));
@@ -37,7 +37,7 @@ fn parses_clean() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     std::env::set_var("STUB_VERDICT", "clean");
     let r = stub()
-        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, &[], None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
         .unwrap();
     assert_eq!(r.verdict, Verdict::Clean);
 }
@@ -49,7 +49,7 @@ fn parses_verdict_from_stdout_when_no_output_file() {
     // 引擎必须能从 stdout 解析出 verdict,而不是因 -o 缺失 fail-closed 成 changes_requested。
     std::env::set_var("STUB_VERDICT", "clean");
     let r = CodexRunner::new(fixture("stub-codex-stdout.sh"))
-        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, &[], None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
         .expect("review ok");
     assert_eq!(r.verdict, Verdict::Clean);
 }
@@ -63,6 +63,7 @@ fn review_times_out_and_errors() {
         Some("HEAD"),
         None,
         false,
+        &[],
         None,
         &mut |_: &str, _: Option<u32>| {},
         &PathBuf::from("."),
@@ -84,6 +85,7 @@ fn review_mr_errors_when_base_ref_missing() {
         Some("agentpipe-nonexistent-base-ref"),
         None,
         false,
+        &[],
         None,
         &mut |_: &str, _: Option<u32>| {},
         &PathBuf::from("."),
@@ -101,7 +103,7 @@ fn unparseable_output_is_changes_requested() {
     // 注入会产出非法 JSON 的 verdict,校验 fail-closed
     std::env::set_var("STUB_VERDICT", "\"broken");
     let r = stub()
-        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
+        .review(&CodexAction::ReviewMr, None, Some("HEAD"), None, false, &[], None, &mut |_: &str, _: Option<u32>| {}, &PathBuf::from("."))
         .unwrap();
     assert_eq!(r.verdict, Verdict::ChangesRequested);
 }
@@ -117,6 +119,7 @@ fn renders_suggestion_when_present_and_skips_na_placeholder() {
             Some("HEAD"),
             None,
             false,
+            &[],
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -149,6 +152,7 @@ fn placeholder_suggestions_skip_recommend_line() {
             Some("HEAD"),
             None,
             false,
+            &[],
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -191,6 +195,7 @@ fn malformed_finding_missing_core_field_falls_back_to_changes_requested() {
             Some("HEAD"),
             None,
             false,
+            &[],
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -227,6 +232,7 @@ fn review_mr_errors_when_base_is_none() {
         None, // base 缺省
         None,
         false,
+        &[],
         None,
         &mut |_: &str, _: Option<u32>| {},
         &PathBuf::from("."),
@@ -251,6 +257,7 @@ fn review_mr_rejects_base_with_whitespace_or_newline() {
         Some("main\n  extra"), // 多行 + 空白
         None,
         false,
+        &[],
         None,
         &mut |_: &str, _: Option<u32>| {},
         &PathBuf::from("."),
@@ -276,6 +283,7 @@ fn review_mr_rejects_dash_prefixed_base_ref_fail_loud() {
             Some("--help"),
             None,
             false,
+            &[],
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -336,6 +344,7 @@ echo "done"
             Some("HEAD"),
             None,
             false,
+            &[],
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -363,7 +372,7 @@ fn vet_replaces_result_when_all_refuted() {
     let (count, _c) = vet_count_file("count");
     let runner = CodexRunner::new(fixture("stub-codex.sh"));
     let r = runner.review(&CodexAction::ReviewMr, None, Some("HEAD"), None, true,
-                          None, &mut |_l, _r| {}, Path::new(".")).unwrap();
+                          &[], None, &mut |_l, _r| {}, Path::new(".")).unwrap();
     assert!(matches!(r.verdict, Verdict::Clean), "vet 全驳回应翻 clean");
     assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2", "必须恰好调 2 次");
 }
@@ -377,7 +386,7 @@ fn vet_failure_keeps_first_result() {
     let (_count, _c) = vet_count_file("fail");
     let runner = CodexRunner::new(fixture("stub-codex.sh"));
     let r = runner.review(&CodexAction::ReviewMr, None, Some("HEAD"), None, true,
-                          None, &mut |_l, _r| {}, Path::new(".")).unwrap();
+                          &[], None, &mut |_l, _r| {}, Path::new(".")).unwrap();
     assert!(matches!(r.verdict, Verdict::ChangesRequested));
     assert!(r.findings.contains("示例问题"), "首轮 findings 必须保留");
 }
@@ -390,7 +399,7 @@ fn vet_not_triggered_on_clean() {
     let (count, _c) = vet_count_file("clean");
     let runner = CodexRunner::new(fixture("stub-codex.sh"));
     let _ = runner.review(&CodexAction::ReviewMr, None, Some("HEAD"), None, true,
-                          None, &mut |_l, _r| {}, Path::new(".")).unwrap();
+                          &[], None, &mut |_l, _r| {}, Path::new(".")).unwrap();
     assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
 }
 
@@ -407,6 +416,7 @@ fn nonzero_exit_without_parsable_output_fails_loud_carrying_stderr() {
             Some("HEAD"),
             None,
             false,
+            &[],
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),
@@ -430,6 +440,7 @@ fn nonzero_exit_with_parsable_stdout_keeps_verdict() {
             Some("HEAD"),
             None,
             false,
+            &[],
             None,
             &mut |_: &str, _: Option<u32>| {},
             &PathBuf::from("."),

@@ -7,6 +7,7 @@ pub enum GateKind {
     Step,
     Human,
     Decision,
+    Permission,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

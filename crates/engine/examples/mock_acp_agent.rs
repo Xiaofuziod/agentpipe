@@ -13,14 +13,18 @@
 //! - fs_probe:server 主动 send_request(ReadTextFileRequest) 探 client 反向 capability;
 //!   MVP client 不声明 fs capability,SDK 应自动报错;mock 忽略错误继续发 chunk
 //!   并完成 prompt,验"反向请求被拒不卡死"(spec §7.4)。
+//! - permission_probe / permission_probe_slow / permission_probe_noallow:server 主动
+//!   request_permission,验证 client 决策通道。
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
     AgentCapabilities, ContentBlock, ContentChunk, InitializeRequest, InitializeResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ReadTextFileRequest,
-    SessionId, SessionNotification, SessionUpdate, StopReason, TextContent,
+    NewSessionRequest, NewSessionResponse, PermissionOption, PermissionOptionId,
+    PermissionOptionKind, PromptRequest, PromptResponse, ReadTextFileRequest,
+    RequestPermissionOutcome, RequestPermissionRequest, SessionId, SessionNotification,
+    SessionUpdate, StopReason, TextContent, ToolCallId, ToolCallUpdate, ToolCallUpdateFields,
 };
-use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Result, Stdio};
+use agent_client_protocol::{Agent, Client, ConnectionTo, Dispatch, Handled, Result, Stdio};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -110,15 +114,77 @@ async fn main() -> Result<()> {
                             ));
                             responder.respond(PromptResponse::new(StopReason::EndTurn))
                         }
+                        "permission_probe"
+                        | "permission_probe_slow"
+                        | "permission_probe_noallow" => {
+                            // 发权限请求 → 按 client outcome 决定 answer:Selected→granted / Cancelled→denied。
+                            // slow 变体在回 chunk 后 sleep 10s 才 EndTurn,给 abort 测试确定性窗口。
+                            // noallow 变体只提供 reject 类选项,钉"Approve 但无 allow 选项 → 回退 Cancelled"。
+                            let slow = scenario == "permission_probe_slow";
+                            let noallow = scenario == "permission_probe_noallow";
+                            let sid = prompt.session_id.clone();
+                            let options = if noallow {
+                                vec![PermissionOption::new(
+                                    PermissionOptionId::new("reject-1"),
+                                    "拒绝",
+                                    PermissionOptionKind::RejectOnce,
+                                )]
+                            } else {
+                                vec![
+                                    PermissionOption::new(
+                                        PermissionOptionId::new("allow-1"),
+                                        "允许一次",
+                                        PermissionOptionKind::AllowOnce,
+                                    ),
+                                    PermissionOption::new(
+                                        PermissionOptionId::new("reject-1"),
+                                        "拒绝",
+                                        PermissionOptionKind::RejectOnce,
+                                    ),
+                                ]
+                            };
+                            let req = RequestPermissionRequest::new(
+                                sid.clone(),
+                                ToolCallUpdate::new(
+                                    ToolCallId::new("tc-perm-1"),
+                                    ToolCallUpdateFields::new().title("mock 权限请求".to_string()),
+                                ),
+                                options,
+                            );
+                            cx.send_request_to(Client, req).on_receiving_result({
+                                let cx2 = cx.clone();
+                                move |resp| async move {
+                                    let text = match resp {
+                                        Ok(r)
+                                            if matches!(
+                                                r.outcome,
+                                                RequestPermissionOutcome::Selected(_)
+                                            ) =>
+                                        {
+                                            "granted"
+                                        }
+                                        _ => "denied",
+                                    };
+                                    let _ = cx2.send_notification(SessionNotification::new(
+                                        sid.clone(),
+                                        SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                            ContentBlock::Text(TextContent::new(text)),
+                                        )),
+                                    ));
+                                    if slow {
+                                        tokio::time::sleep(Duration::from_secs(10)).await;
+                                    }
+                                    responder.respond(PromptResponse::new(StopReason::EndTurn))
+                                }
+                            })
+                        }
                         "long_stream" => {
                             // 每秒发一个 chunk × 30 次,给 abort / timeout 测试足够窗口。
                             for i in 0..30u32 {
                                 let _ = cx.send_notification(SessionNotification::new(
                                     prompt.session_id.clone(),
                                     SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                        ContentBlock::Text(TextContent::new(format!(
-                                            "chunk-{i}"
-                                        ))),
+                                        ContentBlock::Text(TextContent::new(format!("chunk-{i}"))),
                                     )),
                                 ));
                                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -133,9 +199,7 @@ async fn main() -> Result<()> {
                                 let _ = cx.send_notification(SessionNotification::new(
                                     prompt.session_id.clone(),
                                     SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                        ContentBlock::Text(TextContent::new(format!(
-                                            "fast-{i}"
-                                        ))),
+                                        ContentBlock::Text(TextContent::new(format!("fast-{i}"))),
                                     )),
                                 ));
                                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -149,11 +213,18 @@ async fn main() -> Result<()> {
             agent_client_protocol::on_receive_request!(),
         )
         .on_receive_dispatch(
-            async move |message: Dispatch, cx: ConnectionTo<Client>| {
-                message.respond_with_error(
-                    agent_client_protocol::util::internal_error("unhandled message"),
-                    cx,
-                )
+            async move |message: Dispatch, cx: ConnectionTo<Client>| match message {
+                Dispatch::Response(_, _) => Ok(Handled::No {
+                    message,
+                    retry: false,
+                }),
+                _ => {
+                    message.respond_with_error(
+                        agent_client_protocol::util::internal_error("unhandled message"),
+                        cx,
+                    )?;
+                    Ok(Handled::Yes)
+                }
             },
             agent_client_protocol::on_receive_dispatch!(),
         )

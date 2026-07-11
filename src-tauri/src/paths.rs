@@ -1,22 +1,13 @@
 use std::path::PathBuf;
 
-/// 持久化根:AGENTPIPE_HOME 优先,否则 HOME,再否则当前目录。
-/// runs / tasks 都挂在它下面的 .agentpipe/ 里。
-fn base() -> PathBuf {
-    let dir = std::env::var("AGENTPIPE_HOME")
-        .or_else(|_| std::env::var("HOME"))
-        .unwrap_or_else(|_| ".".into());
-    PathBuf::from(dir)
-}
-
 /// ~/.agentpipe/runs(AGENTPIPE_HOME 优先)。与 CLI runs_dir 同义。
 pub fn runs_dir() -> PathBuf {
-    base().join(".agentpipe").join("runs")
+    agentpipe_engine::paths::base_dir().join("runs")
 }
 
 /// ~/.agentpipe/tasks:编排器保存的 task.yaml 默认落点。
 pub fn tasks_dir() -> PathBuf {
-    base().join(".agentpipe").join("tasks")
+    agentpipe_engine::paths::base_dir().join("tasks")
 }
 
 /// 把编排器里用户填的保存路径解析成可写的绝对路径。

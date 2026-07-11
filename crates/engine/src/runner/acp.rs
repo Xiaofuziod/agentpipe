@@ -15,19 +15,20 @@
 use crate::control::Control;
 use crate::error::EngineError;
 use crate::protocol::StepMetrics;
-use std::sync::Once;
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    ContentBlock, CreateTerminalRequest, InitializeRequest, KillTerminalRequest,
-    NewSessionRequest, PromptRequest, ReadTextFileRequest, ReleaseTerminalRequest,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SessionNotification, SessionUpdate, TerminalOutputRequest, TextContent,
-    WaitForTerminalExitRequest, WriteTextFileRequest,
+    AgentRequest, ClientResponse, ContentBlock, CreateTerminalRequest, InitializeRequest,
+    KillTerminalRequest, NewSessionRequest, PermissionOptionKind, PromptRequest,
+    ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionOutcome,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
+    TerminalOutputRequest, TextContent, WaitForTerminalExitRequest, WriteTextFileRequest,
 };
-use agent_client_protocol::{AcpAgent, Agent, ConnectionTo};
+use agent_client_protocol::{AcpAgent, Agent, ConnectionTo, Handled};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self as std_mpsc, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -89,6 +90,39 @@ pub struct AcpOutcome {
     pub full_transcript: String,
 }
 
+/// 权限请求的宿主决策(spec D3)。
+pub enum PermissionDecision {
+    /// 批准:runner 在 agent options 里优先选 AllowOnce,其次 AllowAlways;
+    /// 无 allow 选项 → 回 Cancelled 并在 transcript 记一行。
+    Approve,
+    /// 拒绝该次请求(session 继续)。
+    RejectOnce,
+    /// 中止 run:runner 回 Cancelled 并立即触发 abort 收尾。
+    Abort,
+}
+
+/// 权限策略:Reject = 现状语义(一律 Cancelled);Ask = 每个请求同步回调宿主。
+pub enum PermissionMode<'a> {
+    Reject,
+    Ask(&'a mut dyn FnMut(&str) -> PermissionDecision),
+}
+
+/// worker → main 的权限请求消息。
+struct PermissionAskMsg {
+    description: String,
+    reply: tokio::sync::oneshot::Sender<PermissionReply>,
+}
+
+enum PermissionReply {
+    Approve,
+    Reject,
+}
+
+struct SessionAbort {
+    notify: Arc<tokio::sync::Notify>,
+    permission_abort: Arc<AtomicBool>,
+}
+
 impl AcpRunner {
     pub fn new(config: AcpConfig) -> Self {
         let timeout_secs =
@@ -124,6 +158,7 @@ impl AcpRunner {
         control: Option<&Control>,
         on_progress: &mut dyn FnMut(&str, Option<u32>),
         cwd: &Path,
+        mut permission: PermissionMode<'_>,
     ) -> Result<AcpOutcome, EngineError> {
         // 一次性显式告警:ACP runner 当前 metrics 永远 None,budget_usd 对 ACP step 无效。
         // review §A finding #1 兜底:加 cost 提取还要等 SDK feature 升级,先把 budget
@@ -146,13 +181,15 @@ impl AcpRunner {
 
         // 工作线程 → 主线程:每条 progress 行 + 最终 answer/transcript
         let (progress_tx, progress_rx) = std_mpsc::channel::<String>();
-        let (result_tx, result_rx) =
-            std_mpsc::sync_channel::<Result<AcpOutcome, EngineError>>(1);
+        let (perm_tx, perm_rx) = std_mpsc::channel::<PermissionAskMsg>();
+        let (result_tx, result_rx) = std_mpsc::sync_channel::<Result<AcpOutcome, EngineError>>(1);
 
         // abort 信号(主线程 → 工作线程):Notify::notify_waiters 是事件驱动,工作线程
         // 在 select! 里等 notified(),不需要轮询。
         let abort_notify = Arc::new(tokio::sync::Notify::new());
         let abort_notify_worker = abort_notify.clone();
+        let permission_abort = Arc::new(AtomicBool::new(false));
+        let permission_abort_worker = permission_abort.clone();
 
         // 用 std::thread::scope 共享 control 借用,避免要求 'static + Arc clone。
         // Control: Send + Sync(AtomicBool + Mutex<Option<u32>>),&Control: Send。
@@ -177,7 +214,11 @@ impl AcpRunner {
                     &prompt_owned,
                     &cwd_owned,
                     progress_tx,
-                    abort_notify_worker,
+                    perm_tx,
+                    SessionAbort {
+                        notify: abort_notify_worker,
+                        permission_abort: permission_abort_worker,
+                    },
                 ));
                 let _ = result_tx.send(res);
             });
@@ -194,6 +235,29 @@ impl AcpRunner {
                         abort_notify.notify_waiters();
                     }
                 }
+                // 权限请求:非阻塞取,同步回调宿主(Ask 下可能长阻塞在决策门 —— worker 侧
+                // handler 在 oneshot 上 .await,同一 select! 的 timeout/abort 分支保持活性,
+                // spec D3/F2)。门等待期间本 loop 暂停 drain,已知边界见 spec §5 末条。
+                while let Ok(ask) = perm_rx.try_recv() {
+                    let decision = match &mut permission {
+                        PermissionMode::Reject => PermissionDecision::RejectOnce,
+                        PermissionMode::Ask(cb) => cb(&ask.description),
+                    };
+                    let reply = match decision {
+                        PermissionDecision::Approve => PermissionReply::Approve,
+                        PermissionDecision::RejectOnce => PermissionReply::Reject,
+                        PermissionDecision::Abort => {
+                            permission_abort.store(true, Ordering::SeqCst);
+                            abort_notify.notify_waiters();
+                            PermissionReply::Reject
+                        }
+                    };
+                    // send 失败 = worker 已死(超时先到),按 spec §5 反方向条目:忽略,
+                    // step 终态以 worker 侧 Err 为准。
+                    if ask.reply.send(reply).is_err() {
+                        on_progress("[permission] 决策回填失败: worker 已结束/超时", None);
+                    }
+                }
                 match progress_rx.recv_timeout(Duration::from_millis(MAIN_POLL_INTERVAL_MS)) {
                     Ok(line) => on_progress(&line, None),
                     Err(RecvTimeoutError::Timeout) => {}
@@ -204,7 +268,15 @@ impl AcpRunner {
             // worker 退出 → 取结果。block(short)是必要的:worker 在 send result 后
             // 释放 result_tx,这里等到 worker 真正 send 完。
             match result_rx.recv() {
-                Ok(r) => r,
+                Ok(r) => {
+                    // join 终裁(review P1):join happens-after worker 终态,此处判 abort
+                    // 无竞态窗。只做 Ok→Err 单向折叠;worker 自身的 Err(超时/通信
+                    // 失败)保留原错误。
+                    if control.is_some_and(|c| c.is_aborted()) && r.is_ok() {
+                        return Err(EngineError::Cli("acp: 被用户中止".into()));
+                    }
+                    r
+                }
                 Err(_) => Err(EngineError::Cli("acp: 工作线程异常退出未返回结果".into())),
             }
         })
@@ -221,18 +293,17 @@ async fn run_acp_session(
     prompt: &str,
     cwd: &Path,
     progress_tx: std_mpsc::Sender<String>,
-    abort_notify: Arc<tokio::sync::Notify>,
+    perm_tx: std_mpsc::Sender<PermissionAskMsg>,
+    abort: SessionAbort,
 ) -> Result<AcpOutcome, EngineError> {
     // chunk text 通过 tokio mpsc 串回主流程的 answer accumulator;
     // 不再用 Arc<Mutex<Vec<AcpEvent>>>(review §A finding #8 Mutex poison 隐患 +
     // §A finding #9 每 notification 三次 String clone 的热路径)。
     let (text_tx, mut text_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let (transcript_tx, mut transcript_rx) =
-        tokio::sync::mpsc::unbounded_channel::<String>();
+    let (transcript_tx, mut transcript_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
-    let agent = AcpAgent::from_str(&config.command).map_err(|e| {
-        EngineError::Cli(format!("acp: 无法启动 agent `{}`: {e}", config.command))
-    })?;
+    let agent = AcpAgent::from_str(&config.command)
+        .map_err(|e| EngineError::Cli(format!("acp: 无法启动 agent `{}`: {e}", config.command)))?;
 
     let cwd_owned = cwd.to_path_buf();
     let prompt_owned = prompt.to_string();
@@ -264,12 +335,62 @@ async fn run_acp_session(
             agent_client_protocol::on_receive_notification!(),
         )
         .on_receive_request(
-            async move |_request: RequestPermissionRequest, responder, _cx| {
-                // MVP 策略:统一 Cancelled,不弹审批(spec §7.4 / V2 接入 GateKind::Decision)。
-                tracing::warn!("acp: permission/request 收到,MVP 一律拒绝");
-                responder.respond(RequestPermissionResponse::new(
-                    RequestPermissionOutcome::Cancelled,
-                ))
+            {
+                let perm_tx = perm_tx.clone();
+                let transcript_tx = transcript_tx.clone();
+                async move |request: AgentRequest, responder, _cx| {
+                    let AgentRequest::RequestPermissionRequest(request) = request else {
+                        return Ok(Handled::No { message: (request, responder), retry: false });
+                    };
+                    let perm_tx = perm_tx.clone();
+                    let transcript_tx = transcript_tx.clone();
+                    let description = request
+                        .tool_call
+                        .fields
+                        .title
+                        .clone()
+                        .unwrap_or_else(|| format!("{:?}", request.tool_call.tool_call_id));
+                    let _ = transcript_tx.send(format!("[permission] 请求: {description}"));
+                    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+                    let outcome = if perm_tx
+                        .send(PermissionAskMsg { description, reply: reply_tx })
+                        .is_err()
+                    {
+                        RequestPermissionOutcome::Cancelled
+                    } else {
+                        match reply_rx.await {
+                            Ok(PermissionReply::Approve) => {
+                                let pick = request
+                                    .options
+                                    .iter()
+                                    .find(|o| matches!(o.kind, PermissionOptionKind::AllowOnce))
+                                    .or_else(|| {
+                                        request.options.iter().find(|o| {
+                                            matches!(o.kind, PermissionOptionKind::AllowAlways)
+                                        })
+                                    });
+                                match pick {
+                                    Some(o) => RequestPermissionOutcome::Selected(
+                                        SelectedPermissionOutcome::new(o.option_id.clone()),
+                                    ),
+                                    None => {
+                                        let _ = transcript_tx.send(
+                                            "[permission] 批准但 agent 未提供 allow 选项,回退 Cancelled".into(),
+                                        );
+                                        RequestPermissionOutcome::Cancelled
+                                    }
+                                }
+                            }
+                            Ok(PermissionReply::Reject) | Err(_) => RequestPermissionOutcome::Cancelled,
+                        }
+                    };
+                    let response = serde_json::to_value(ClientResponse::RequestPermissionResponse(
+                        RequestPermissionResponse::new(outcome),
+                    ))
+                    .map_err(agent_client_protocol::util::internal_error)?;
+                    responder.respond(response)?;
+                    Ok(Handled::Yes)
+                }
             },
             agent_client_protocol::on_receive_request!(),
         );
@@ -290,36 +411,37 @@ async fn run_acp_session(
         ],
     );
 
-    let connect_fut = builder.connect_with(agent, move |connection: ConnectionTo<Agent>| async move {
-        // initialize 握手 + 版本协商。
-        let init = connection
-            .send_request(InitializeRequest::new(ProtocolVersion::V1))
-            .block_task()
-            .await?;
-        // 协议版本 fail-loud:只接受 V1(MVP 锁 stable wire,见 spec §7.2 / §7.3)。
-        if init.protocol_version != ProtocolVersion::V1 {
-            return Err(agent_client_protocol::util::internal_error(format!(
-                "acp: 协议版本不匹配,需要 V1,server 返回 {}",
-                init.protocol_version.as_u16()
-            )));
-        }
+    let connect_fut =
+        builder.connect_with(agent, move |connection: ConnectionTo<Agent>| async move {
+            // initialize 握手 + 版本协商。
+            let init = connection
+                .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                .block_task()
+                .await?;
+            // 协议版本 fail-loud:只接受 V1(MVP 锁 stable wire,见 spec §7.2 / §7.3)。
+            if init.protocol_version != ProtocolVersion::V1 {
+                return Err(agent_client_protocol::util::internal_error(format!(
+                    "acp: 协议版本不匹配,需要 V1,server 返回 {}",
+                    init.protocol_version.as_u16()
+                )));
+            }
 
-        let new_session = connection
-            .send_request(NewSessionRequest::new(cwd_owned))
-            .block_task()
-            .await?;
-        let session_id = new_session.session_id;
+            let new_session = connection
+                .send_request(NewSessionRequest::new(cwd_owned))
+                .block_task()
+                .await?;
+            let session_id = new_session.session_id;
 
-        let prompt_resp = connection
-            .send_request(PromptRequest::new(
-                session_id.clone(),
-                vec![ContentBlock::Text(TextContent::new(prompt_owned))],
-            ))
-            .block_task()
-            .await?;
+            let prompt_resp = connection
+                .send_request(PromptRequest::new(
+                    session_id.clone(),
+                    vec![ContentBlock::Text(TextContent::new(prompt_owned))],
+                ))
+                .block_task()
+                .await?;
 
-        Ok::<_, agent_client_protocol::Error>(prompt_resp.stop_reason)
-    });
+            Ok::<_, agent_client_protocol::Error>(prompt_resp.stop_reason)
+        });
 
     // drop 本地的 text_tx / transcript_tx(callback 内的 clone 还活着),让两个 rx
     // 在 connect 完后自然收尾。
@@ -352,11 +474,14 @@ async fn run_acp_session(
             }
             res = &mut connect_fut => {
                 break match res {
+                    Ok(stop) if abort.permission_abort.load(Ordering::SeqCst) => {
+                        Err(EngineError::Cli("acp: 被用户中止".into()))
+                    }
                     Ok(stop) => Ok(stop),
                     Err(e) => Err(EngineError::Cli(format!("acp: 连接/通信失败: {e}"))),
                 };
             }
-            _ = abort_notify.notified() => {
+            _ = abort.notify.notified() => {
                 break Err(EngineError::Cli("acp: 被用户中止".into()));
             }
             _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
@@ -380,6 +505,10 @@ async fn run_acp_session(
 
     // drop progress_tx 让主线程的 recv 收到 Disconnected → 退出 drain 循环。
     drop(progress_tx);
+
+    if abort.permission_abort.load(Ordering::SeqCst) {
+        return Err(EngineError::Cli("acp: 被用户中止".into()));
+    }
 
     let stop_reason = stop_reason?;
 
@@ -407,9 +536,33 @@ fn format_update_for_log(update: &SessionUpdate) -> String {
             ContentBlock::Text(t) => format!("[think] {}", truncate(&t.text, 80)),
             _ => "[think] <non-text>".to_string(),
         },
-        SessionUpdate::ToolCall(tc) => format!("[tool] {:?}", tc),
-        SessionUpdate::ToolCallUpdate(tc) => format!("[tool-update] {:?}", tc),
-        SessionUpdate::Plan(p) => format!("[plan] {:?}", p),
+        SessionUpdate::ToolCall(tc) => format!(
+            "[tool] {} · {:?} · {:?}",
+            truncate(&tc.title, 60),
+            tc.kind,
+            tc.status
+        ),
+        SessionUpdate::ToolCallUpdate(u) => {
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(t) = &u.fields.title {
+                parts.push(truncate(t, 60));
+            }
+            if let Some(s) = &u.fields.status {
+                parts.push(format!("{s:?}"));
+            }
+            if parts.is_empty() {
+                parts.push(format!("{:?}", u.tool_call_id));
+            }
+            format!("[tool-update] {}", parts.join(" · "))
+        }
+        SessionUpdate::Plan(p) => {
+            let first = p
+                .entries
+                .first()
+                .map(|e| truncate(&e.content, 60))
+                .unwrap_or_default();
+            format!("[plan] {} 项 · {first}", p.entries.len())
+        }
         _ => format!("[update] {:?}", update),
     }
 }
@@ -419,5 +572,43 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max).collect::<String>() + "..."
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_client_protocol::schema::v1::{
+        Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCall, ToolCallId, ToolCallStatus,
+        ToolKind,
+    };
+
+    #[test]
+    fn tool_call_renders_title_kind_status_not_debug() {
+        let tc = ToolCall::new(ToolCallId::new("t1"), "读取配置文件")
+            .kind(ToolKind::Read)
+            .status(ToolCallStatus::InProgress);
+        let line = format_update_for_log(&SessionUpdate::ToolCall(tc));
+        assert!(line.starts_with("[tool] "), "{line}");
+        assert!(line.contains("读取配置文件"), "{line}");
+        assert!(
+            !line.contains("ToolCall {"),
+            "不许再用 Debug 全量输出: {line}"
+        );
+    }
+
+    #[test]
+    fn plan_renders_entry_count_and_first_item() {
+        let plan = Plan::new(vec![
+            PlanEntry::new(
+                "先读代码",
+                PlanEntryPriority::High,
+                PlanEntryStatus::Pending,
+            ),
+            PlanEntry::new("再改", PlanEntryPriority::Low, PlanEntryStatus::Pending),
+        ]);
+        let line = format_update_for_log(&SessionUpdate::Plan(plan));
+        assert!(line.starts_with("[plan] 2 项"), "{line}");
+        assert!(line.contains("先读代码"), "{line}");
     }
 }

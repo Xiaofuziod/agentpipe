@@ -1,9 +1,11 @@
 pub mod audit;
+pub mod agents;
 pub mod context;
 pub mod control;
 pub mod error;
 pub mod executor;
 pub mod manifest;
+pub mod paths;
 pub mod protocol;
 pub mod runner;
 pub mod worktree;

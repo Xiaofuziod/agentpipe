@@ -94,6 +94,7 @@ Convergence is checked right after the loop's last `codex` step finishes each ro
 |--------|--------------|
 | claude | Run Claude once on a prompt (optionally referencing a skill). Runs at the CLI's highest permission (bypassPermissions). |
 | codex  | Codex as a reviewer: `review-doc` / `review-mr` (structured `verdict` + `findings`) / `ask`. Optional `vet: true` adds a read-only self-challenge pass — findings Codex can't back up with code evidence get dropped before they reach the fixer (verification itself failing falls back to the original findings). |
+| acp    | Run an external ACP agent by name. The command can be inline or resolved from agents.toml; supports verify gates and on_permission reject or ask. |
 | human  | A human does something (often in their own Claude Code session); the engine waits for approval + an artifact. Can be pre-seeded with `value` to run headless. |
 | loop   | Wrap a body of sub-steps; `until: codex-clean` converges. Exhausting `max` pauses at a decision gate (retry / skip / abort) — it never passes silently. Optional `allow_residual: minor\|major\|nit` also converges once every residual finding is at or below that severity. |
 

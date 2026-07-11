@@ -15,6 +15,12 @@ fn runner_bins() -> RunnerBins {
     }
 }
 
+fn prepare_for_launch(mut manifest: Manifest) -> Result<Manifest, String> {
+    agentpipe_engine::agents::load_and_resolve_if_needed(&mut manifest).map_err(|e| e.to_string())?;
+    manifest.validate().map_err(|e| e.to_string())?;
+    Ok(manifest)
+}
+
 /// 模板目录:安装后读打进 bundle 的资源(自包含,与 tauri.conf.json > bundle > resources
 /// 同一相对路径语法);dev 模式或资源缺失时兜底回源码仓 templates/。
 fn templates_dir(app: &AppHandle) -> std::path::PathBuf {
@@ -29,7 +35,7 @@ fn templates_dir(app: &AppHandle) -> std::path::PathBuf {
 /// 校验通过的 manifest → 启动引擎(单 Run 不变式:已有活跃 Run 则拒绝)。
 /// start_run(从文件) 与 start_run_inline(从对象) 共用此尾段。
 fn launch(app: AppHandle, state: &State<AppState>, manifest: Manifest) -> Result<(), String> {
-    manifest.validate().map_err(|e| e.to_string())?;
+    let manifest = prepare_for_launch(manifest)?;
     let mut active = state.active.lock().unwrap();
     if active.is_some() {
         return Err("已有运行中的 Run,请先结束".into());
@@ -76,7 +82,7 @@ pub fn send_command(state: State<AppState>, cmd: Command) -> Result<(), String> 
 
 #[tauri::command]
 pub fn save_manifest(manifest: Manifest, path: String) -> Result<(), String> {
-    manifest.validate().map_err(|e| e.to_string())?;
+    manifest.validate_authoring().map_err(|e| e.to_string())?;
     let yaml = serde_yml::to_string(&manifest).map_err(|e| e.to_string())?;
     // 安装后 GUI 进程 cwd=/(只读),裸名 / 相对路径会写到只读根 → EROFS。
     // 统一经 resolve_task_path 落到可写的 ~/.agentpipe/tasks/(或用户给的绝对路径)。
@@ -113,9 +119,8 @@ pub fn load_template(app: AppHandle, name: String) -> Result<Manifest, String> {
     let p = templates_dir(&app).join(format!("{name}.yaml"));
     let yaml = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
     let manifest = Manifest::parse(&yaml).map_err(|e| e.to_string())?;
-    // 与 save_manifest / launch 同一道校验:非法模板在载入时 fail-loud 报出,
-    // 而不是留到保存/运行时才炸(那时 GUI 已经把它当成合法 manifest 渲染)。
-    manifest.validate().map_err(|e| e.to_string())?;
+    // 读写边界只做作者态校验:按名 acp 模板可打开,运行前再 resolve + Run 校验。
+    manifest.validate_authoring().map_err(|e| e.to_string())?;
     Ok(manifest)
 }
 
@@ -312,6 +317,19 @@ mod tests {
         // 同一 step "a" 成本不同 → changed
         assert!(rows.iter().any(|r| r.step_id == "a" && r.kind == "changed"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_manifest_accepts_named_acp_template() {
+        let path = tmp("named-acp-template.yaml");
+        let manifest = Manifest::parse("version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: gemini\n    prompt: hi\n").unwrap();
+
+        save_manifest(manifest, path.to_string_lossy().into_owned()).expect("作者态应允许 command 省略");
+
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("agent: gemini"), "{saved}");
+        assert!(!saved.contains("command:"), "{saved}");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

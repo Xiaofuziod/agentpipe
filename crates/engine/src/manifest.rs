@@ -18,6 +18,10 @@ pub struct Manifest {
     /// 见 docs/specs/2026-06-26-review-loop-budget-and-verdict-design.md §3.1。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_usd: Option<f64>,
+    /// 显式确认:budget_usd 与不计费 step(acp,metrics 恒 None)并存。缺省 false =
+    /// validate 拒绝该组合(fail-closed)。见 acp-hardening spec D1。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_unmetered: bool,
     pub steps: Vec<Step>,
 }
 
@@ -45,19 +49,19 @@ pub struct Step {
 pub enum StepKind {
     Claude {
         prompt: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         skill: Option<String>,
         /// 可选校验门:步骤跑完后判目标是否达成,未达成带反馈重试。见 verify-gate spec。
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         verify: Option<Verify>,
     },
     Codex {
         action: CodexAction,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         base: Option<String>,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
         /// 可选自反驳核验:review 结果非 clean 时追加一次 read-only codex 调用,
         /// 逐条用代码证据复核 findings,误报在喂给下游 fixer 前被过滤。
@@ -67,7 +71,7 @@ pub enum StepKind {
     },
     Human {
         instruction: String,
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         expects: Option<String>,
         /// 启动时预置的人工输入(GUI「启动任务」表单注入)。Some 且插值后非空则直接记录为
         /// 产物、跳过人工 gate;否则维持发 gate 等用户。模板不存此字段(保持通用),仅
@@ -86,15 +90,23 @@ pub enum StepKind {
     },
     /// 通用 ACP (Agent Client Protocol) 步骤:把任何实现 ACP server 的外部 agent
     /// (claude-agent-acp / codex-acp / gemini-cli --acp / ...)接入 pipeline。
-    /// 设计见 docs/specs/2026-06-25-acp-integration-design.md。MVP 不带 skill / verify。
+    /// 设计见 docs/specs/2026-06-25-acp-integration-design.md。MVP 不带 skill。
     Acp {
         /// 显示用 agent 名称(日志 / UI 展示用,例 "gemini" / "claude-acp")。
         agent: String,
-        /// 启动外部 ACP server 的完整命令(shell-words 切分),例:
-        /// `"npx @agentclientprotocol/claude-agent-acp"` 或绝对路径 + args。
-        command: String,
+        /// 启动外部 ACP server 的完整命令(shell-words 切分)。可省略:由
+        /// `agents::resolve_agents` pre-pass 按 agent 名从 agents.toml 回填。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
         /// 提示词;支持 `{{step-id.field}}` 插值。
         prompt: String,
+        /// 可选校验门:与 claude step 同语义(裁判 codex/claude/command 与 step 类型解耦)。
+        /// 见 acp-hardening spec D2。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        verify: Option<Verify>,
+        /// 反向权限请求策略:缺省 reject 保持旧行为;ask 则交由宿主 Permission gate。
+        #[serde(default, skip_serializing_if = "PermissionPolicy::is_reject")]
+        on_permission: PermissionPolicy,
     },
 }
 
@@ -111,20 +123,20 @@ pub enum CodexAction {
 pub struct Verify {
     pub by: Verifier,
     /// codex verifier:判据形态(review-mr / review-doc / ask)。claude verifier 忽略。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<CodexAction>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// codex(ask 指令)或 claude(判定指令)的 prompt。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
     /// claude verifier 的 skill(可选)。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,
     /// command verifier 的 shell 命令(仅 by: command 用);exit 0 = 达成。
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
     /// 未达成时重跑干活步骤的次数上限(0 = 纯质量门,不重试)。
     #[serde(default = "default_max_retries")]
@@ -156,6 +168,22 @@ pub enum OnUnmet {
     Continue,
 }
 
+/// acp 反向权限请求策略:reject = 一律拒(缺省,fail-closed 现状);
+/// ask = 经 GateKind::Permission 权限门问宿主。见 acp-hardening spec D3。
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionPolicy {
+    #[default]
+    Reject,
+    Ask,
+}
+
+impl PermissionPolicy {
+    fn is_reject(&self) -> bool {
+        matches!(self, Self::Reject)
+    }
+}
+
 fn default_max_retries() -> u32 {
     2
 }
@@ -166,12 +194,28 @@ fn default_true() -> bool {
 /// verify.max_retries 的硬上限,防 runaway(每次重试都烧一个 claude + 一个 codex)。
 const MAX_VERIFY_RETRIES: u32 = 10;
 
+#[derive(Clone, Copy)]
+enum ValidationMode {
+    Authoring,
+    Run,
+}
+
 impl Manifest {
     pub fn parse(yaml: &str) -> Result<Self, EngineError> {
         serde_yml::from_str(yaml).map_err(|e| EngineError::Parse(e.to_string()))
     }
 
     pub fn validate(&self) -> Result<(), EngineError> {
+        self.validate_impl(ValidationMode::Run)
+    }
+
+    /// 作者态校验:容忍 acp command: None("还没配 registry"是运行前置条件,
+    /// 不是模板非法);Some("") 空串仍拒;其余规则与 Run 完全一致。
+    pub fn validate_authoring(&self) -> Result<(), EngineError> {
+        self.validate_impl(ValidationMode::Authoring)
+    }
+
+    fn validate_impl(&self, mode: ValidationMode) -> Result<(), EngineError> {
         if let Some(b) = self.budget_usd {
             // NaN / 负数 / 0 都无意义(0 = 任何 step 完成就触发,无法跑);用 is_finite 防 inf/NaN 误配。
             if !b.is_finite() || b <= 0.0 {
@@ -180,8 +224,18 @@ impl Manifest {
                 )));
             }
         }
+        if self.budget_usd.is_some() && !self.allow_unmetered {
+            let mut acp_ids = Vec::new();
+            Self::collect_acp_ids(&self.steps, &mut acp_ids);
+            if !acp_ids.is_empty() {
+                return Err(EngineError::Validation(format!(
+                    "budget_usd 已设置,但 step [{}] 是 acp 步骤,当前不上报 cost、不计入 budget(预算对其无效)。两条出路:去掉 budget_usd,或在 manifest 顶层显式声明 allow_unmetered: true",
+                    acp_ids.join(", ")
+                )));
+            }
+        }
         for step in &self.steps {
-            Self::validate_step(step)?;
+            Self::validate_step(step, mode)?;
         }
         Ok(())
     }
@@ -226,43 +280,46 @@ impl Manifest {
         }
     }
 
-    fn validate_step(step: &Step) -> Result<(), EngineError> {
+    /// verify 门配置校验(Claude / Acp step 共用,spec D2)。
+    fn validate_verify(step_id: &str, v: &Verify) -> Result<(), EngineError> {
+        match v.by {
+            Verifier::Codex => {
+                let action = v.action.as_ref().ok_or_else(|| {
+                    EngineError::Validation(format!(
+                        "step '{step_id}': verify by codex 需要 action 字段"
+                    ))
+                })?;
+                Self::validate_codex_fields(step_id, "verify codex", action, &v.path, &v.base, &v.prompt)?;
+            }
+            Verifier::Claude => {
+                if v.prompt.is_none() {
+                    return Err(EngineError::Validation(format!(
+                        "step '{step_id}': verify by claude 需要 prompt 字段(判定指令)"
+                    )));
+                }
+            }
+            Verifier::Command => {
+                Self::require_non_empty(
+                    step_id,
+                    "verify command",
+                    v.command.as_deref().unwrap_or(""),
+                    Some("shell 命令,例: command: \"cargo test\""),
+                )?;
+            }
+        }
+        if v.max_retries > MAX_VERIFY_RETRIES {
+            return Err(EngineError::Validation(format!(
+                "step '{step_id}': verify.max_retries 不能超过 {MAX_VERIFY_RETRIES}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn validate_step(step: &Step, mode: ValidationMode) -> Result<(), EngineError> {
         match &step.kind {
             StepKind::Claude { verify, .. } => {
                 if let Some(v) = verify {
-                    match v.by {
-                        Verifier::Codex => {
-                            let action = v.action.as_ref().ok_or_else(|| {
-                                EngineError::Validation(format!(
-                                    "step '{}': verify by codex 需要 action 字段",
-                                    step.id
-                                ))
-                            })?;
-                            Self::validate_codex_fields(&step.id, "verify codex", action, &v.path, &v.base, &v.prompt)?;
-                        }
-                        Verifier::Claude => {
-                            if v.prompt.is_none() {
-                                return Err(EngineError::Validation(format!(
-                                    "step '{}': verify by claude 需要 prompt 字段(判定指令)",
-                                    step.id
-                                )));
-                            }
-                        }
-                        Verifier::Command => {
-                            Self::require_non_empty(
-                                &step.id,
-                                "verify command",
-                                v.command.as_deref().unwrap_or(""),
-                                Some("shell 命令,例: command: \"cargo test\""),
-                            )?;
-                        }
-                    }
-                    if v.max_retries > MAX_VERIFY_RETRIES {
-                        return Err(EngineError::Validation(format!(
-                            "step '{}': verify.max_retries 不能超过 {MAX_VERIFY_RETRIES}",
-                            step.id
-                        )));
-                    }
+                    Self::validate_verify(&step.id, v)?;
                 }
                 Ok(())
             }
@@ -312,22 +369,46 @@ impl Manifest {
                     )));
                 }
                 for s in body {
-                    Self::validate_step(s)?;
+                    Self::validate_step(s, mode)?;
                 }
                 Ok(())
             }
-            StepKind::Acp { agent, command, prompt } => {
+            StepKind::Acp { agent, command, prompt, verify, .. } => {
                 Self::require_non_empty(&step.id, "acp.agent", agent, Some("显示用名称"))?;
-                Self::require_non_empty(
-                    &step.id,
-                    "acp.command",
-                    command,
-                    Some("启动外部 agent 的完整命令"),
-                )?;
+                match command {
+                    None if matches!(mode, ValidationMode::Run) => {
+                        return Err(EngineError::Validation(format!(
+                            "step '{}': acp.command 缺失,且 agents registry 未命中 '{agent}'。两条出路:在 step 内联 command,或在 {} 增加 [agents.{agent}] command = \"...\"",
+                            step.id,
+                            crate::paths::registry_path().display()
+                        )))
+                    }
+                    None => {}
+                    Some(c) => Self::require_non_empty(
+                        &step.id,
+                        "acp.command",
+                        c,
+                        Some("启动外部 agent 的完整命令"),
+                    )?,
+                }
                 Self::require_non_empty(&step.id, "acp.prompt", prompt, None)?;
+                if let Some(v) = verify {
+                    Self::validate_verify(&step.id, v)?;
+                }
                 Ok(())
             }
             _ => Ok(()),
+        }
+    }
+
+    /// 递归收集 acp step id(含 loop body),供 D1 budget 硬拦报错点名。
+    fn collect_acp_ids(steps: &[Step], out: &mut Vec<String>) {
+        for s in steps {
+            match &s.kind {
+                StepKind::Acp { .. } => out.push(s.id.clone()),
+                StepKind::Loop { body, .. } => Self::collect_acp_ids(body, out),
+                _ => {}
+            }
         }
     }
 }
@@ -403,6 +484,39 @@ mod tests {
     }
 
     #[test]
+    fn budget_with_acp_step_rejected_without_ack() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: gemini --acp\n    prompt: hi\n";
+        let err = Manifest::parse(y).unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("a"), "错误必须点名 acp step id: {err}");
+        assert!(err.contains("allow_unmetered"), "错误必须给出 ack 出路: {err}");
+    }
+
+    #[test]
+    fn budget_with_acp_step_allowed_with_ack() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nallow_unmetered: true\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: gemini --acp\n    prompt: hi\n";
+        assert!(Manifest::parse(y).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn budget_without_acp_unaffected() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nsteps:\n  - id: c\n    kind: claude\n    prompt: hi\n";
+        assert!(Manifest::parse(y).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn acp_without_budget_unaffected() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n";
+        assert!(Manifest::parse(y).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn budget_detects_acp_inside_loop_body() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nsteps:\n  - id: l\n    kind: loop\n    until: codex-clean\n    max: 2\n    body:\n      - id: r\n        kind: codex\n        action: review-mr\n        base: main\n      - id: inner\n        kind: acp\n        agent: g\n        command: c\n        prompt: p\n";
+        let err = Manifest::parse(y).unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("inner"), "loop body 内的 acp 必须被递归发现: {err}");
+    }
+
+    #[test]
     fn worktree_false_not_serialized() {
         let m = Manifest::parse("version: 1\nname: t\ntarget: /tmp\nsteps: []\n").unwrap();
         let y = serde_yml::to_string(&m).unwrap();
@@ -415,9 +529,9 @@ mod tests {
         let m = Manifest::parse(y).unwrap();
         assert!(m.validate().is_ok());
         match &m.steps[0].kind {
-            StepKind::Acp { agent, command, prompt } => {
+            StepKind::Acp { agent, command, prompt, .. } => {
                 assert_eq!(agent, "gemini");
-                assert_eq!(command, "gemini --acp");
+                assert_eq!(command.as_deref(), Some("gemini --acp"));
                 assert_eq!(prompt, "hi");
             }
             other => panic!("expected Acp, got {other:?}"),
@@ -430,5 +544,97 @@ mod tests {
         let m = Manifest::parse(y).unwrap();
         let err = m.validate().unwrap_err();
         assert!(err.to_string().contains("command"), "err = {err}");
+    }
+
+    #[test]
+    fn validate_authoring_allows_named_acp_without_command() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: ask\n    kind: acp\n    agent: \"gemini\"\n    prompt: \"hi\"\n";
+        let m = Manifest::parse(y).unwrap();
+        assert!(m.validate_authoring().is_ok());
+        assert!(m.validate().is_err(), "Run 档仍必须拒绝未解析 command");
+    }
+
+    #[test]
+    fn validate_authoring_rejects_empty_acp_command() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: ask\n    kind: acp\n    agent: \"gemini\"\n    command: \"\"\n    prompt: \"hi\"\n";
+        let m = Manifest::parse(y).unwrap();
+        let err = m.validate_authoring().unwrap_err();
+        assert!(err.to_string().contains("command"), "err = {err}");
+    }
+
+    #[test]
+    fn validate_authoring_keeps_budget_unmetered_guard() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nbudget_usd: 5.0\nsteps:\n  - id: ask\n    kind: acp\n    agent: \"gemini\"\n    prompt: \"hi\"\n";
+        let err = Manifest::parse(y)
+            .unwrap()
+            .validate_authoring()
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("allow_unmetered"), "err = {err}");
+    }
+
+    #[test]
+    fn acp_verify_codex_missing_action_rejected() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n    verify:\n      by: codex\n";
+        let err = Manifest::parse(y).unwrap().validate().unwrap_err().to_string();
+        assert!(err.contains("verify by codex 需要 action"), "{err}");
+    }
+
+    #[test]
+    fn acp_verify_command_accepted() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n    verify:\n      by: command\n      command: \"true\"\n";
+        assert!(Manifest::parse(y).unwrap().validate().is_ok());
+    }
+
+    #[test]
+    fn acp_missing_command_error_mentions_registry() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: gemini\n    prompt: p\n";
+        let err = Manifest::parse(y).unwrap().validate().unwrap_err().to_string();
+        let registry_path = crate::paths::registry_path();
+        assert!(
+            err.contains(&registry_path.display().to_string()),
+            "错误必须指向 registry 出路: {err}"
+        );
+        assert!(err.contains("gemini"), "错误必须点名 agent: {err}");
+    }
+
+    #[test]
+    fn acp_on_permission_defaults_reject_and_parses_ask() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n    on_permission: ask\n";
+        let m = Manifest::parse(y).unwrap();
+        assert!(m.validate().is_ok());
+        match &m.steps[0].kind {
+            StepKind::Acp { on_permission, .. } => {
+                assert_eq!(*on_permission, PermissionPolicy::Ask);
+            }
+            other => panic!("expected Acp, got {other:?}"),
+        }
+        let y2 = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n";
+        let m2 = Manifest::parse(y2).unwrap();
+        assert!(m2.validate().is_ok(), "缺字段 = reject 缺省,向后兼容");
+        match &m2.steps[0].kind {
+            StepKind::Acp { on_permission, .. } => {
+                assert_eq!(*on_permission, PermissionPolicy::Reject);
+            }
+            other => panic!("expected Acp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn minimal_acp_serializes_without_default_noise() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n";
+        let m = Manifest::parse(y).unwrap();
+        let out = serde_yml::to_string(&m).unwrap();
+        assert!(!out.contains("on_permission"), "{out}");
+        assert!(!out.contains("verify"), "{out}");
+        assert!(!out.contains("skill"), "{out}");
+    }
+
+    #[test]
+    fn acp_on_permission_ask_serializes_explicitly() {
+        let y = "version: 1\nname: t\ntarget: /tmp\nsteps:\n  - id: a\n    kind: acp\n    agent: g\n    command: c\n    prompt: p\n    on_permission: ask\n";
+        let m = Manifest::parse(y).unwrap();
+        let out = serde_yml::to_string(&m).unwrap();
+        assert!(out.contains("on_permission: ask"), "{out}");
     }
 }

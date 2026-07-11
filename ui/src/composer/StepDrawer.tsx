@@ -205,11 +205,23 @@ function Fields({
             <label className="label">command</label>
             <input
               className="input input-mono"
-              placeholder="npx @agentclientprotocol/claude-agent-acp"
-              value={step.command}
-              onChange={(e) => onChange({ ...step, command: e.target.value })}
+              placeholder="留空则按 agent 名查 ~/.agentpipe/agents.toml"
+              value={step.command ?? ""}
+              onChange={(e) => onChange({ ...step, command: e.target.value === "" ? undefined : e.target.value })}
             />
-            <div className="hint">启动 ACP server 的完整命令(shell-words 切分)。</div>
+            <div className="hint">启动 ACP server 的完整命令(shell-words 切分);留空则按 agent 名查 ~/.agentpipe/agents.toml。</div>
+          </div>
+          <div className="field">
+            <label className="label">on_permission</label>
+            <select
+              className="select"
+              value={step.on_permission ?? "reject"}
+              onChange={(e) => onChange({ ...step, on_permission: e.target.value === "ask" ? "ask" : undefined })}
+            >
+              <option value="reject">reject</option>
+              <option value="ask">ask</option>
+            </select>
+            <div className="hint">ask = 权限请求经决策门问你;headless 下自动中止。reject 为缺省。</div>
           </div>
           <div className="field">
             <label className="label">prompt</label>
@@ -220,18 +232,21 @@ function Fields({
               onChange={(e) => onChange({ ...step, prompt: e.target.value })}
             />
           </div>
+          <VerifySection step={step} onChange={onChange} />
         </>
       );
   }
 }
 
 type ClaudeStep = Extract<Step, { kind: "claude" }>;
+type AcpStep = Extract<Step, { kind: "acp" }>;
+type VerifiableStep = ClaudeStep | AcpStep;
 
 function VerifySection({
   step,
   onChange,
 }: {
-  step: ClaudeStep;
+  step: VerifiableStep;
   onChange: (s: Step) => void;
 }) {
   const [open, setOpen] = useState(!!step.verify);
@@ -404,7 +419,7 @@ function VerifySection({
               checked={v.feedback ?? true}
               onChange={(e) => patch({ feedback: e.target.checked })}
             />
-            feedback(将校验结论反馈给 Claude)
+            feedback(将校验结论反馈给执行 agent)
           </label>
         </div>
       )}

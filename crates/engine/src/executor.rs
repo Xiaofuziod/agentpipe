@@ -1,6 +1,8 @@
 use crate::context::{RunContext, Severity, StepOutput, Verdict};
 use crate::control::Control;
-use crate::manifest::{Manifest, OnUnmet, RunMode, Step, StepKind, Verifier, Verify};
+use crate::manifest::{
+    Manifest, OnUnmet, PermissionPolicy, RunMode, Step, StepKind, Verifier, Verify,
+};
 use crate::protocol::{Command, Event, GateKind, LoopEndReason, RunStatus, StepMetrics, StepStatus};
 use crate::runner::claude::ClaudeRunner;
 use crate::runner::codex::CodexRunner;
@@ -16,6 +18,19 @@ enum StepDecision {
     Retry,
     Skip,
     Abort,
+}
+
+/// 干活步骤的种类:verify-retry 循环内"跑一次 attempt"的分派参数。
+/// review §A finding #7 的差异体现在 Err 分支:Acp 的 runner-Err 不进决策门
+/// (metrics 恒 None,budget 兜不住重试烧钱),失败 = fail + request_abort。
+enum VerifiedWork<'a> {
+    Claude { prompt: &'a str, skill: Option<&'a str> },
+    Acp {
+        agent: &'a str,
+        command: &'a str,
+        prompt: &'a str,
+        on_permission: PermissionPolicy,
+    },
 }
 
 pub struct Executor {
@@ -120,6 +135,177 @@ impl Executor {
         RunStatus::Success
     }
 
+    /// 公共 verify-retry 循环:跑一次 attempt → charge → (可选)verify → 未达标带反馈重试。
+    /// 从 Claude match arm 外提(acp-hardening spec D2),Claude / Acp 共用。
+    fn run_verified_step(
+        &mut self,
+        step_id: &str,
+        work: VerifiedWork<'_>,
+        verify: Option<&Verify>,
+    ) -> Result<(), ()> {
+        let mut on_line = self.progress_sink(step_id);
+        let mut attempt = 0u32; // 校验重试计数(与失败重试独立)
+        let mut feedback: Option<String> = None;
+        // 累积该 step 内所有 attempt + verifier 的 metrics(review-2 §B finding #2/#7)。
+        // finish 拿到的是 cumulative 而非末次 attempt,审计 / GUI 总 cost 不再低估。
+        let mut step_metrics: Option<StepMetrics> = None;
+        let done_label = match &work {
+            VerifiedWork::Claude { .. } => "done",
+            VerifiedWork::Acp { .. } => "done · acp",
+        };
+        loop {
+            let attempt_result = {
+                let mut p = match &work {
+                    VerifiedWork::Claude { prompt, .. } => self.ctx.interpolate(prompt),
+                    VerifiedWork::Acp { prompt, .. } => self.ctx.interpolate(prompt),
+                };
+                if let Some(f) = &feedback {
+                    p.push_str(&format!("\n\n上一轮校验反馈:\n{f}\n请据此修正后重做。"));
+                }
+                match &work {
+                    VerifiedWork::Claude { skill, .. } => self
+                        .claude
+                        .run(&p, *skill, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd, false)
+                        .map(|out| (out.answer, out.metrics))
+                        .map_err(|e| e.to_string()),
+                    VerifiedWork::Acp { agent, command, on_permission, .. } => {
+                        let runner = crate::runner::acp::AcpRunner::new(crate::runner::acp::AcpConfig {
+                            agent: (*agent).to_string(),
+                            command: (*command).to_string(),
+                        });
+                        let result = {
+                            use crate::runner::acp::{PermissionDecision, PermissionMode};
+                            let mut ask_cb;
+                            let permission = match on_permission {
+                                PermissionPolicy::Reject => PermissionMode::Reject,
+                                PermissionPolicy::Ask => {
+                                    ask_cb = |desc: &str| {
+                                        let suggestion = format!(
+                                            "acp step 权限请求:{desc}。批准 / 拒绝 / 中止"
+                                        );
+                                        match self.gate_with_kind(step_id, suggestion, GateKind::Permission) {
+                                            StepDecision::Retry => PermissionDecision::Approve,
+                                            StepDecision::Skip => PermissionDecision::RejectOnce,
+                                            StepDecision::Abort => PermissionDecision::Abort,
+                                        }
+                                    };
+                                    PermissionMode::Ask(&mut ask_cb)
+                                }
+                            };
+                            runner.run(&p, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd, permission)
+                        };
+                        result.map(|out| (out.answer, out.metrics)).map_err(|e| e.to_string())
+                    }
+                }
+            };
+            let (answer, metrics) = match attempt_result {
+                Ok(v) => v,
+                Err(e) => match &work {
+                    VerifiedWork::Claude { .. } => match self.handle_failure(step_id, e) {
+                        StepDecision::Retry => continue,
+                        StepDecision::Skip => {
+                            self.emit_skipped(step_id);
+                            return Ok(());
+                        }
+                        StepDecision::Abort => return Err(()),
+                    },
+                    VerifiedWork::Acp { .. } => {
+                        self.fail(step_id, e);
+                        self.control.request_abort();
+                        return Err(());
+                    }
+                },
+            };
+            // 每次 attempt 都 charge —— verify-retry 中段不再丢 cost(本 PR 主修)。
+            // 先 sum 出 cumulative 再 check_budget:budget 触发的 StepFailed 携带
+            // 该 step 至今的全部花费,audit 不漏统计(review §A finding #4)。
+            self.charge(&metrics);
+            step_metrics = StepMetrics::sum(step_metrics, metrics);
+            self.check_budget(step_id, &step_metrics)?;
+            self.ctx.record(step_id, StepOutput {
+                artifact: Some(answer.clone()),
+                ..Default::default()
+            });
+            // 用户裁决(2026-06-26):每轮 fix 也要看详情。把 answer 文本
+            // 追发到 progress,UI 展开 step 输出能看到本轮干活的最终回答 / 修复说明。
+            // 截断 30 行兜底防长 answer 撑爆面板。
+            emit_answer_preview(&answer, &mut on_line);
+
+            // 无校验门 → 退出码即完成(原行为)
+            let v = match verify {
+                None => {
+                    self.finish(step_id, done_label.into(), step_metrics);
+                    return Ok(());
+                }
+                Some(v) => v,
+            };
+            on_line("校验中…", None);
+            let (verdict, findings, verifier_metrics) = self.verify_once(v, &mut on_line);
+            // verifier 自身的 cost 也入账(spec §3.1:verifier 的钱也要进 budget)。
+            // 同样 charge → sum → check 顺序,确保 budget StepFailed 拿到包含
+            // verifier 这一笔的 cumulative。
+            self.charge(&verifier_metrics);
+            step_metrics = StepMetrics::sum(step_metrics, verifier_metrics);
+            self.check_budget(step_id, &step_metrics)?;
+            // 暴露 verifier findings 供下游 {{<id>.findings}} 引用
+            self.ctx.record(step_id, StepOutput {
+                artifact: Some(answer.clone()),
+                findings: Some(findings.clone()),
+                ..Default::default()
+            });
+            if matches!(verdict, Verdict::Clean) {
+                on_line("校验通过", None);
+                self.finish(step_id, format!("{done_label} · 已校验"), step_metrics);
+                return Ok(());
+            }
+            // 未达成:还有重试预算就带反馈重跑
+            if attempt < v.max_retries {
+                attempt += 1;
+                on_line(&format!("校验未通过,第 {attempt} 次重试"), None);
+                feedback = if v.feedback { Some(findings) } else { None };
+                continue;
+            }
+            // 重试耗尽 → 升级策略
+            match v.on_unmet {
+                OnUnmet::Continue => {
+                    self.finish(step_id, format!("{done_label} · 未达标(continue)"), step_metrics);
+                    return Ok(());
+                }
+                OnUnmet::Fail => {
+                    // cost 已经在每次 attempt + verifier 后 charge 过,此处不再补 charge
+                    // (否则重复)。但要把 step_metrics 带进 StepFailed,让 audit
+                    // 看到 verify-retry 累积花费 — review §A finding #4 治本(前 PR
+                    // 这条路径是「known trade-off」直接丢 cost,与 budget 触发的 fail
+                    // 路径同形,本次统一)。
+                    self.fail_with_metrics(
+                        step_id,
+                        format!("校验未通过(已重试 {} 次)", v.max_retries),
+                        step_metrics.clone(),
+                    );
+                    return Err(());
+                }
+                OnUnmet::Gate => {
+                    let suggestion = format!(
+                        "校验未通过(重试 {} 次仍未达标),选择 重试 / 跳过 / 中止\n{findings}",
+                        v.max_retries
+                    );
+                    match self.decision_gate(step_id, suggestion) {
+                        StepDecision::Retry => {
+                            attempt = 0; // 人工再批一次,给新预算
+                            feedback = if v.feedback { Some(findings) } else { None };
+                            continue;
+                        }
+                        StepDecision::Skip => {
+                            self.emit_skipped(step_id);
+                            return Ok(());
+                        }
+                        StepDecision::Abort => return Err(()),
+                    }
+                }
+            }
+        }
+    }
+
     fn run_step(&mut self, step: &Step, gated: bool) -> Result<(), ()> {
         if self.control.is_aborted() {
             return Err(());
@@ -217,169 +403,34 @@ impl Executor {
                     }
                 }
             }
-            StepKind::Claude { prompt, skill, verify } => {
-                let mut on_line = self.progress_sink(&step.id);
-                let mut attempt = 0u32; // 校验重试计数(与失败重试独立)
-                let mut feedback: Option<String> = None;
-                // 累积该 step 内所有 attempt + verifier 的 metrics(review-2 §B finding #2/#7)。
-                // finish 拿到的是 cumulative 而非末次 attempt,审计 / GUI 总 cost 不再低估。
-                let mut step_metrics: Option<StepMetrics> = None;
-                loop {
-                    let mut p = self.ctx.interpolate(prompt);
-                    if let Some(f) = &feedback {
-                        p.push_str(&format!("\n\n上一轮校验反馈:\n{f}\n请据此修正后重做。"));
-                    }
-                    let out = match self.claude.run(
-                        &p,
-                        skill.as_deref(),
-                        Some(self.control.as_ref()),
-                        &mut on_line,
-                        &self.ctx.cwd,
-                        false, // 干活步骤可写
-                    ) {
-                        Ok(out) => out,
-                        Err(e) => match self.handle_failure(&step.id, e.to_string()) {
-                            StepDecision::Retry => continue,
-                            StepDecision::Skip => {
-                                self.emit_skipped(&step.id);
-                                return Ok(());
-                            }
-                            StepDecision::Abort => return Err(()),
-                        },
-                    };
-                    let metrics = out.metrics;
-                    let answer = out.answer;
-                    // 每次 attempt 都 charge —— verify-retry 中段不再丢 cost(本 PR 主修)。
-                    // 先 sum 出 cumulative 再 check_budget:budget 触发的 StepFailed 携带
-                    // 该 step 至今的全部花费,audit 不漏统计(review §A finding #4)。
-                    self.charge(&metrics);
-                    step_metrics = StepMetrics::sum(step_metrics,metrics);
-                    self.check_budget(&step.id, &step_metrics)?;
-                    self.ctx.record(&step.id, StepOutput {
-                        artifact: Some(answer.clone()),
-                        ..Default::default()
-                    });
-                    // 用户裁决(2026-06-26):每轮 fix 也要看详情。把 claude answer 文本
-                    // 追发到 progress,UI 展开 step 输出能看到本轮干活的最终回答 / 修复说明。
-                    // 截断 30 行兜底防长 answer 撑爆面板。
-                    emit_answer_preview(&answer, &mut on_line);
-
-                    // 无校验门 → 退出码即完成(原行为)
-                    let v = match verify {
-                        None => {
-                            self.finish(&step.id, "done".into(), step_metrics);
-                            return Ok(());
-                        }
-                        Some(v) => v,
-                    };
-                    on_line("校验中…", None);
-                    let (verdict, findings, verifier_metrics) = self.verify_once(v, &mut on_line);
-                    // verifier 自身的 cost 也入账(spec §3.1:verifier 钱也要进 budget)。
-                    // 同样 charge → sum → check 顺序,确保 budget StepFailed 拿到包含
-                    // verifier 这一笔的 cumulative。
-                    self.charge(&verifier_metrics);
-                    step_metrics = StepMetrics::sum(step_metrics,verifier_metrics);
-                    self.check_budget(&step.id, &step_metrics)?;
-                    // 暴露 verifier findings 供下游 {{<id>.findings}} 引用
-                    self.ctx.record(&step.id, StepOutput {
-                        artifact: Some(answer.clone()),
-                        findings: Some(findings.clone()),
-                        ..Default::default()
-                    });
-                    if matches!(verdict, Verdict::Clean) {
-                        on_line("校验通过", None);
-                        self.finish(&step.id, "done · 已校验".into(), step_metrics);
-                        return Ok(());
-                    }
-                    // 未达成:还有重试预算就带反馈重跑
-                    if attempt < v.max_retries {
-                        attempt += 1;
-                        on_line(&format!("校验未通过,第 {attempt} 次重试"), None);
-                        feedback = if v.feedback { Some(findings) } else { None };
-                        continue;
-                    }
-                    // 重试耗尽 → 升级策略
-                    match v.on_unmet {
-                        OnUnmet::Continue => {
-                            self.finish(&step.id, "done · 未达标(continue)".into(), step_metrics);
-                            return Ok(());
-                        }
-                        OnUnmet::Fail => {
-                            // cost 已经在每次 attempt + verifier 后 charge 过,此处不再补 charge
-                            // (否则重复)。但要把 step_metrics 带进 StepFailed,让 audit
-                            // 看到 verify-retry 累积花费 — review §A finding #4 治本(前 PR
-                            // 这条路径是「known trade-off」直接丢 cost,与 budget 触发的 fail
-                            // 路径同形,本次统一)。
-                            self.fail_with_metrics(
-                                &step.id,
-                                format!("校验未通过(已重试 {} 次)", v.max_retries),
-                                step_metrics.clone(),
-                            );
-                            return Err(());
-                        }
-                        OnUnmet::Gate => {
-                            let suggestion = format!(
-                                "校验未通过(重试 {} 次仍未达标),选择 重试 / 跳过 / 中止\n{findings}",
-                                v.max_retries
-                            );
-                            match self.decision_gate(&step.id, suggestion) {
-                                StepDecision::Retry => {
-                                    attempt = 0; // 人工再批一次,给新预算
-                                    feedback = if v.feedback { Some(findings) } else { None };
-                                    continue;
-                                }
-                                StepDecision::Skip => {
-                                    self.emit_skipped(&step.id);
-                                    return Ok(());
-                                }
-                                StepDecision::Abort => return Err(()),
-                            }
-                        }
-                    }
-                }
-            }
+            StepKind::Claude { prompt, skill, verify } => self.run_verified_step(
+                &step.id,
+                VerifiedWork::Claude { prompt, skill: skill.as_deref() },
+                verify.as_ref(),
+            ),
             StepKind::Human { instruction, expects, value } => {
                 let instr = self.ctx.interpolate(instruction);
                 self.run_human(step, &instr, expects.is_some(), value.as_deref())
             }
-            StepKind::Acp { agent, command, prompt } => {
-                // review §A finding #7:ACP step 不走自动 retry loop。理由:ACP runner
-                // 当前 metrics 永远 None(F1),如果遇到 empty-answer / 配错 agent 一类
-                // fail-loud 失败,decision_gate 的 Retry 选项在 budget_usd=None 时不被
-                // budget 兜底,容易让用户连点 Retry 无限烧 LLM 钱。
-                //
-                // 与 claude(有 verify-retry 语义)/ codex(单次 review)不同:ACP 是
-                // 「跑一次拿 answer」的通用接入层,没有 verify 概念,失败重试本应由
-                // 用户手动重启 run(顺便确认是否调整 budget),不在自动决策门内重试。
-                // Skip / Abort 仍可走。
-                let mut on_line = self.progress_sink(&step.id);
-                let p = self.ctx.interpolate(prompt);
-                let runner = crate::runner::acp::AcpRunner::new(crate::runner::acp::AcpConfig {
-                    agent: agent.clone(),
-                    command: command.clone(),
-                });
-                match runner.run(&p, Some(self.control.as_ref()), &mut on_line, &self.ctx.cwd) {
-                    Ok(out) => {
-                        // 同 codex/claude 路径:charge 单次 → check_budget 带 cumulative。
-                        // ACP 单次 step 无累积,cumulative = 单次。
-                        self.charge(&out.metrics);
-                        self.check_budget(&step.id, &out.metrics)?;
-                        self.ctx.record(&step.id, StepOutput {
-                            artifact: Some(out.answer.clone()),
-                            ..Default::default()
-                        });
-                        self.finish(&step.id, "done · acp".into(), out.metrics);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        // 失败直接 emit StepFailed + Err 退 step,不走 decision_gate。
-                        // 触发 abort 标志让 run() 顶层分类落 Aborted("ACP 失败,人工
-                        // 重启 run"),与「budget=None 时的隐式重试 LLM 烧钱」彻底脱钩。
-                        self.fail(&step.id, e.to_string());
-                        self.control.request_abort();
-                        Err(())
-                    }
-                }
+            StepKind::Acp { agent, command, prompt, verify, on_permission } => {
+                let Some(cmd) = command.as_deref() else {
+                    self.fail(&step.id, format!(
+                        "acp step '{}' 的 command 未解析(resolve_agents 未跑或 registry 未命中)",
+                        step.id
+                    ));
+                    self.control.request_abort();
+                    return Err(());
+                };
+                self.run_verified_step(
+                    &step.id,
+                    VerifiedWork::Acp {
+                        agent,
+                        command: cmd,
+                        prompt,
+                        on_permission: *on_permission,
+                    },
+                    verify.as_ref(),
+                )
             }
             StepKind::Loop { until, max, allow_residual, body } => {
                 self.run_loop(&step.id, until, *max, *allow_residual, body, gated)
@@ -395,7 +446,7 @@ impl Executor {
     /// 误分类为 Failed("引擎失败"),Tauri 宿主当前用 Command::Abort+request_abort 配对
     /// 才避开这条,但引擎库 API 不该依赖 host 的对齐 — 这里 fail-loud 翻 abort 标志,
     /// 与 Tauri 路径同构,SDK 嵌入方零负担。
-    fn decision_gate(&self, step_id: &str, suggestion: String) -> StepDecision {
+    fn gate_with_kind(&self, step_id: &str, suggestion: String, kind: GateKind) -> StepDecision {
         if self.control.is_aborted() {
             return StepDecision::Abort;
         }
@@ -403,7 +454,7 @@ impl Executor {
             step_id: step_id.to_string(),
             suggestion,
             expects_artifact: false,
-            gate_kind: GateKind::Decision,
+            gate_kind: kind,
         });
         match self.commands.recv() {
             Ok(Command::ApproveGate { .. }) => StepDecision::Retry,
@@ -416,6 +467,10 @@ impl Executor {
                 StepDecision::Abort
             }
         }
+    }
+
+    fn decision_gate(&self, step_id: &str, suggestion: String) -> StepDecision {
+        self.gate_with_kind(step_id, suggestion, GateKind::Decision)
     }
 
     /// step 失败(进程非零)的处理:发 StepFailed 后走决策 gate。
